@@ -39,4 +39,3 @@ cp .env.example .env.local   # completar
 npm install
 npm run dev
 ```
-"# deposito-niviko" 

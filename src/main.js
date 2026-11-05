@@ -257,9 +257,10 @@ function resetFormL() {
 }
 const safeName = (n) => n.normalize("NFD").replace(/[^\w.\-]+/g, "_").slice(-80);
 async function subirArchivo(legajoId, file, mime, tipoDoc) {
-  const path = `legajos/${legajoId}/${Date.now()}-${safeName(file.name)}`;
+  const nombre = file.name || `factura-escaneada.${mime === "application/pdf" ? "pdf" : "jpg"}`;
+  const path = `legajos/${legajoId}/${Date.now()}-${safeName(nombre)}`;
   const r = await uploadBytes(sref(storage, path), file, { contentType: mime });
-  return { path, nombre: file.name, tipoDoc, mime, size: r.metadata.size || file.size, ...firmar(), en: nowISO() };
+  return { path, nombre, tipoDoc, mime, size: r.metadata.size || file.size, ...firmar(), en: nowISO() };
 }
 async function guardarLegajo(e) {
   e.preventDefault();
@@ -406,6 +407,12 @@ function initCompras() {
     </div>
     <form class="panel" id="formC" hidden autocomplete="off">
       <h2>Cargar compra</h2>
+      <div class="scan">
+        <div style="display:grid;gap:2px;min-width:0"><b>Escanear factura</b><span class="hint">Sacale una foto o subí el PDF y se completa todo solo. Después revisás y guardás.</span></div>
+        <label class="btn primary" for="scanFile">📷 Escanear</label>
+        <input type="file" id="scanFile" accept="image/jpeg,image/png,image/webp,application/pdf" hidden>
+      </div>
+      <div class="note" id="scanMsg" hidden></div>
       <div class="grid2">
         <label class="f">Fecha<input type="date" id="cFecha" required></label>
         <label class="f">Proveedor<input type="text" id="cProv" required placeholder="Ej: Ningbo Home Co."></label>
@@ -456,6 +463,7 @@ function initCompras() {
     renderItems();
   });
   $("#formC").addEventListener("submit", guardarCompra);
+  $("#scanFile").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) escanearFactura(f); };
   ["input", "change"].forEach((ev) => { $("#qC").addEventListener(ev, renderCompras); $("#mC").addEventListener(ev, renderCompras); });
   $("#listC").addEventListener("click", (e) => { const b = e.target.closest("[data-openc]"); if (b) openCompra(b.dataset.openc); });
   renderCompras();
@@ -471,7 +479,7 @@ function abrirFormCompra(legajo) {
   const f = $("#formC"); f.reset(); itemsF = [nuevoItem(), nuevoItem(), nuevoItem()];
   $("#cFecha").value = legajo?.fecha || hoy(); refreshLegajoSelect();
   if (legajo) { $("#cLeg").value = legajo.id; $("#cProv").value = legajo.proveedor || ""; $("#cFact").value = legajo.factura || ""; if (legajo.tipo !== "local") $("#cMon").value = "USD"; }
-  $("#formCErr").hidden = true; renderItems(); f.hidden = false; $("#bNuevaC").hidden = true; $("#cProv").focus();
+  scan = null; scanMsg(""); $("#formCErr").hidden = true; renderItems(); f.hidden = false; $("#bNuevaC").hidden = true; $("#cProv").focus();
 }
 function renderItems() {
   $("#itemsBody").innerHTML = itemsF.map((it, i) => `<tr>
@@ -498,12 +506,28 @@ async function guardarCompra(e) {
   err(""); const b = $("#bGuardarC"); b.disabled = true;
   try {
     const id = doc(collection(db, "compras")).id; const f = firmar(); const fecha = $("#cFecha").value || hoy(); const moneda = $("#cMon").value;
+    let legajoId = $("#cLeg").value || null;
+    if (scan?.blob) {
+      // La factura escaneada queda guardada en el legajo (existente o uno nuevo)
+      const lid = legajoId || doc(collection(db, "legajos")).id;
+      const arch = await subirArchivo(lid, scan.blob, scan.mime, "factura");
+      if (legajoId) await updateDoc(doc(db, "legajos", lid), { archivos: arrayUnion(arch) });
+      else {
+        await setDoc(doc(db, "legajos", lid), {
+          tipo: "local", proveedor: $("#cProv").value.trim(), factura: $("#cFact").value.trim(), fecha, courier: "", guia: "", despacho: "", contenedor: "", despachante: "",
+          notas: "Creado al escanear la factura de compra.", notasOficina: "", estado: "pendiente", archivos: [arch],
+          creadoPor: f.por, creadoPorNombre: f.porNombre, creadoEn: nowISO(), recibidoPor: null, recibidoPorNombre: null, recibidoEn: null,
+        });
+        legajoId = lid;
+      }
+      scan = null;
+    }
     const unidades = items.reduce((a, it) => a + it.cant, 0);
     const total = items.reduce((a, it) => a + it.cant * it.pu, 0);
     const batch = writeBatch(db);
     batch.set(doc(db, "compras", id), {
       fecha, mes: mesDe(fecha), proveedor: $("#cProv").value.trim(), factura: $("#cFact").value.trim(), moneda,
-      legajoId: $("#cLeg").value || null, notas: $("#cNotas").value.trim(),
+      legajoId, notas: $("#cNotas").value.trim(),
       items: items.map(({ sku, desc, cant }) => ({ sku, desc, cant })), unidades,
       creadoPor: f.por, creadoPorNombre: f.porNombre, creadoEn: nowISO(),
     });
@@ -515,6 +539,56 @@ async function guardarCompra(e) {
     $("#formC").hidden = true; $("#bNuevaC").hidden = false; $("#mC").value = mesDe(fecha); renderCompras();
   } catch (e2) { console.error(e2); err("No se pudo guardar la compra. Probá de nuevo."); }
   finally { b.disabled = false; }
+}
+/* ---- escaneo de facturas con Claude ---- */
+let scan = null;
+function scanMsg(t, tipo = "") { const n = $("#scanMsg"); n.textContent = t || ""; n.className = "note" + (tipo ? " " + tipo : ""); n.hidden = !t; }
+async function achicarImagen(file) {
+  const img = await createImageBitmap(file);
+  const k = Math.min(1, 2200 / Math.max(img.width, img.height));
+  const c = document.createElement("canvas"); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return await new Promise((r) => c.toBlob(r, "image/jpeg", 0.85));
+}
+const aBase64 = (blob) => new Promise((ok, mal) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result).split(",")[1]); fr.onerror = mal; fr.readAsDataURL(blob); });
+async function escanearFactura(file) {
+  const mime0 = mimeOf(file);
+  if (!mime0) return scanMsg("Formato no admitido. Usá una foto JPG/PNG o un PDF.", "err");
+  const lbl = $('label[for="scanFile"]'); lbl.style.pointerEvents = "none"; lbl.style.opacity = ".5";
+  try {
+    let blob = file, mime = mime0;
+    if (mime0.startsWith("image/")) { scanMsg("Preparando la foto…"); blob = await achicarImagen(file); mime = "image/jpeg"; }
+    else if (file.size > 3.2 * 1048576) return scanMsg("El PDF pesa más de 3 MB. Sacale una foto a la factura o mandá un PDF más liviano.", "err");
+    scanMsg("Leyendo la factura… puede tardar unos 20 segundos.");
+    const token = await auth.currentUser.getIdToken();
+    const r = await fetch("/api/leer-factura", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + token }, body: JSON.stringify({ mime, data: await aBase64(blob) }) });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) return scanMsg(out.error || "No se pudo leer la factura.", "err");
+    const fa = out.factura || {};
+    if (fa.proveedor) $("#cProv").value = fa.proveedor;
+    if (fa.numero) $("#cFact").value = [fa.tipo_comprobante, fa.numero].filter(Boolean).join(" ").replace(/^Factura /i, "");
+    if (/^\d{4}-\d{2}-\d{2}$/.test(fa.fecha || "")) $("#cFecha").value = fa.fecha;
+    if (fa.moneda === "USD" || fa.moneda === "ARS") $("#cMon").value = fa.moneda;
+    const skuSet = new Map(S.skus.map((x) => [x.sku.toUpperCase(), x]));
+    itemsF = (fa.items || []).map((it) => {
+      const cod = (it.codigo || "").trim(); const known = skuSet.get(cod.toUpperCase());
+      return { sku: known ? known.sku : cod, desc: it.descripcion || known?.desc || "", cant: it.cantidad ? fmtNum(it.cantidad, it.cantidad % 1 ? 2 : 0) : "", pu: it.precio_unitario ? fmtNum(it.precio_unitario, 2) : "" };
+    });
+    if (!itemsF.length) itemsF = [nuevoItem()];
+    renderItems();
+    scan = { blob, mime };
+    // control de sumas
+    const suma = (fa.items || []).reduce((a, it) => a + (it.cantidad || 0) * (it.precio_unitario || 0), 0);
+    const ref = fa.subtotal_neto || fa.total || 0;
+    const ok = !ref || Math.abs(suma - ref) <= Math.max(1, ref * 0.01) || (fa.total && Math.abs(suma - fa.total) <= Math.max(1, fa.total * 0.01));
+    const avisos = [];
+    if (!ok) avisos.push(S.admin ? `La suma de los ítems (${fmtMon(suma, $("#cMon").value)}) no coincide con la factura (${fmtMon(ref, $("#cMon").value)}). Revisá cantidades, bonificaciones o flete.` : "La suma de los ítems no coincide con el total de la factura. Revisá cantidades y precios antes de guardar.");
+    if (fa.moneda === "OTRA") avisos.push("La factura está en otra moneda: elegí la moneda correcta.");
+    if (fa.observaciones) avisos.push("Nota de lectura: " + fa.observaciones);
+    const nuevos = itemsF.filter((i) => i.sku && !skuSet.has(i.sku.toUpperCase())).length;
+    scanMsg(`Leí ${itemsF.length} renglón${itemsF.length === 1 ? "" : "es"}${nuevos ? ` (${nuevos} con código que no está en tu lista de SKUs)` : ""}. Revisá y tocá Guardar. ${avisos.join(" ")}`, ok && fa.moneda !== "OTRA" ? "" : "err");
+  } catch (e) { console.error(e); scanMsg("No se pudo leer la factura. Revisá la conexión y probá de nuevo.", "err"); }
+  finally { lbl.style.pointerEvents = ""; lbl.style.opacity = ""; }
 }
 function renderCompras() {
   const el = $("#listC"); if (!el) return;

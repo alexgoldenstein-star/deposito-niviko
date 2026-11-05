@@ -1,0 +1,5 @@
+{
+  "functions": {
+    "api/leer-factura.js": { "maxDuration": 60 }
+  }
+}

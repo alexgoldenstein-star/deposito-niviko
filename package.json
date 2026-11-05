@@ -9,7 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "firebase": "10.14.1"
+    "firebase": "10.14.1",
+    "jose": "5.9.6"
   },
   "devDependencies": {
     "vite": "5.4.10"
