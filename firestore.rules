@@ -1,0 +1,49 @@
+rules_version = '2';
+// Depósito NIVIKO — reglas de Firestore
+// - Solo usuarios dados de alta y activos (colección "usuarios") pueden usar la app.
+// - Los montos de compras viven en "comprasMontos": cualquier empleado puede CREAR
+//   (cargar precios al dar de alta una compra), pero solo admins pueden LEER o editar.
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+    function superadmin() {
+      return signedIn() && request.auth.token.email == 'alexgoldenstein@hotmail.com';
+    }
+    function perfilPath() { return /databases/$(database)/documents/usuarios/$(request.auth.uid); }
+    function perfil() { return get(perfilPath()).data; }
+    function activo() {
+      return superadmin() || (signedIn() && exists(perfilPath()) && perfil().activo == true);
+    }
+    function admin() {
+      return superadmin() || (activo() && perfil().rol == 'admin');
+    }
+
+    match /usuarios/{uid} {
+      allow read: if signedIn() && (request.auth.uid == uid || admin());
+      allow write: if admin();
+    }
+
+    match /legajos/{id} {
+      allow read, create, update: if activo();
+      allow delete: if admin();
+    }
+
+    match /skus/{id} {
+      allow read, create, update: if activo();
+      allow delete: if admin();
+    }
+
+    // Cabecera de la compra: proveedor, fecha, ítems con SKU y cantidades (sin precios)
+    match /compras/{id} {
+      allow read, create: if activo();
+      allow update, delete: if admin();
+    }
+
+    // Precios, subtotales y total de cada compra. Mismo id que en "compras".
+    match /comprasMontos/{id} {
+      allow create: if activo();
+      allow read, update, delete: if admin();
+    }
+  }
+}

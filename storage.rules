@@ -1,0 +1,28 @@
+rules_version = '2';
+// Depósito NIVIKO — reglas de Storage (PDF y fotos de legajos)
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function superadmin() {
+      return request.auth != null && request.auth.token.email == 'alexgoldenstein@hotmail.com';
+    }
+    function perfil() {
+      return firestore.get(/databases/(default)/documents/usuarios/$(request.auth.uid)).data;
+    }
+    function activo() {
+      return superadmin() || (request.auth != null && perfil().activo == true);
+    }
+    function admin() {
+      return superadmin() || (activo() && perfil().rol == 'admin');
+    }
+
+    match /legajos/{legajoId}/{archivo} {
+      allow read: if activo();
+      allow create: if activo()
+        && request.resource.size < 20 * 1024 * 1024
+        && (request.resource.contentType.matches('image/(jpeg|png|webp)')
+            || request.resource.contentType == 'application/pdf');
+      allow delete: if admin();
+    }
+  }
+}
