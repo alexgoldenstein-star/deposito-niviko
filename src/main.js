@@ -1,14 +1,14 @@
 import "./style.css";
 import { auth, db, storage, secondaryAuth, SUPERADMIN, configOk } from "./firebase.js";
 import { onAuthStateChanged, signInWithEmailAndPassword, signOut, createUserWithEmailAndPassword, sendPasswordResetEmail } from "firebase/auth";
-import { collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, limit, writeBatch, addDoc, arrayUnion } from "firebase/firestore";
+import { collection, doc, getDoc, setDoc, updateDoc, deleteDoc, onSnapshot, query, orderBy, limit, writeBatch, arrayUnion } from "firebase/firestore";
 import { ref as sref, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
 /* ================= constantes y utilidades ================= */
 const TIPOS = {
-  local: { label: "Compra local", corto: "Local", req: ["factura"] },
-  courier: { label: "Courier internacional", corto: "Courier", req: ["factura", "guia", "despacho"] },
-  contenedor: { label: "Contenedor", corto: "Contenedor", req: ["factura_despacho", "despacho"] },
+  local: { label: "Compra local", corto: "Local", req: ["factura"], mon: "ARS" },
+  courier: { label: "Courier internacional", corto: "Courier", req: ["factura", "guia", "despacho"], mon: "USD" },
+  contenedor: { label: "Contenedor", corto: "Contenedor", req: ["factura_despacho", "despacho"], mon: "USD" },
 };
 const DOCS = { factura: "Factura", guia: "Guía / AWB", despacho: "Despacho", factura_despacho: "Factura de despacho", remito: "Remito", packing: "Packing list", foto: "Foto mercadería", otro: "Otro" };
 const $ = (s, r = document) => r.querySelector(s);
@@ -22,9 +22,10 @@ const MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "o
 const fmtMes = (m) => { const [y, mm] = m.split("-"); return `${MESES[+mm - 1]} ${y}`; };
 const kb = (n) => (n > 1048576 ? (n / 1048576).toFixed(1) + " MB" : Math.max(1, Math.round(n / 1024)) + " KB");
 const fmtNum = (n, d = 0) => (Number(n) || 0).toLocaleString("es-AR", { minimumFractionDigits: d, maximumFractionDigits: d });
+const fmtCant = (n) => fmtNum(n, n % 1 ? 2 : 0);
 const fmtMon = (n, mon = "ARS") => (mon === "USD" ? "US$ " : "$ ") + fmtNum(n, 2);
-// "1.234,56" / "1234.56" / "1,5" → número
 function parseNum(s) {
+  if (typeof s === "number") return s;
   s = String(s ?? "").trim().replace(/[^\d.,-]/g, "");
   if (!s) return 0;
   if (s.includes(",")) s = s.replace(/\./g, "").replace(",", ".");
@@ -42,10 +43,11 @@ const S = {
   unsubs: [],
 };
 const app = $("#app");
+const compraDe = (l) => S.compras.find((c) => c.id === l.id) || S.compras.find((c) => c.legajoId === l.id);
 
 /* ================= arranque / login ================= */
 if (!configOk) {
-  app.innerHTML = `<div class="login"><div class="panel" style="max-width:460px"><h2>Falta configurar Firebase</h2><p class="hint">Cargá las variables <span class="mono">VITE_FB_*</span> en Vercel (o en <span class="mono">.env.local</span>) y volvé a desplegar.</p></div></div>`;
+  app.innerHTML = `<div class="login"><div class="panel" style="max-width:460px"><h2>Falta configurar Firebase</h2><p class="hint">Cargá las variables <span class="mono">VITE_FB_*</span> en Vercel y volvé a desplegar.</p></div></div>`;
 } else {
   onAuthStateChanged(auth, async (u) => {
     S.unsubs.forEach((f) => f()); S.unsubs = [];
@@ -107,8 +109,7 @@ function renderBloqueado(msg) {
 
 /* ================= shell ================= */
 const TABS = [
-  { id: "legajos", label: "Documentación" },
-  { id: "compras", label: "Compras" },
+  { id: "ingresos", label: "Ingresos" },
   { id: "skus", label: "SKUs ML" },
   { id: "resumen", label: "Resumen", admin: true },
   { id: "usuarios", label: "Usuarios", admin: true },
@@ -123,22 +124,22 @@ function renderShell() {
   </div></header>
   <div class="wrap"><main>
     <div class="note err" id="gNote" hidden></div>
-    <section id="v-legajos"></section>
-    <section id="v-compras" hidden></section>
+    <section id="v-ingresos"></section>
     <section id="v-skus" hidden></section>
     ${S.admin ? `<section id="v-resumen" hidden></section><section id="v-usuarios" hidden></section>` : ""}
   </main></div>
+  <datalist id="dlSkus"></datalist>
   <div class="ov" id="ov" hidden><div class="sheet" id="sheet" role="dialog" aria-modal="true"></div></div>`;
   $("#bSalir").onclick = () => signOut(auth);
   $("#ov").addEventListener("click", (e) => { if (e.target.id === "ov") closeSheet(); });
-  initLegajos(); initCompras(); initSkus();
+  initIngresos(); initSkus();
   if (S.admin) { initResumen(); initUsuarios(); }
   window.onhashchange = route; route();
   subscribeAll();
 }
 function route() {
   const ids = TABS.filter((t) => !t.admin || S.admin).map((t) => t.id);
-  const v = ids.includes(location.hash.slice(1)) ? location.hash.slice(1) : "legajos";
+  const v = ids.includes(location.hash.slice(1)) ? location.hash.slice(1) : "ingresos";
   ids.forEach((id) => { $("#v-" + id).hidden = id !== v; });
   $$("nav.tabs a").forEach((a) => a.dataset.tab === v ? a.setAttribute("aria-current", "page") : a.removeAttribute("aria-current"));
   if (v === "resumen") renderResumen();
@@ -147,52 +148,157 @@ function setCount(id, n) { const el = $("#cnt-" + id); if (el) { el.textContent 
 function gNote(t) { const n = $("#gNote"); if (n) { n.textContent = t || ""; n.hidden = !t; } }
 let sheetRender = null;
 function openSheet(fn) { sheetRender = fn; fn(); $("#ov").hidden = false; document.body.style.overflow = "hidden"; }
-function closeSheet() { sheetRender = null; $("#ov").hidden = true; $("#sheet").innerHTML = ""; document.body.style.overflow = ""; }
+function closeSheet() { sheetRender = null; $("#ov").hidden = true; $("#sheet").innerHTML = ""; $("#sheet").onclick = null; document.body.style.overflow = ""; }
 addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#ov") && !$("#ov").hidden) closeSheet(); });
 const firmar = () => ({ por: S.user.uid, porNombre: S.perfil.nombre || S.user.email });
 
 function subscribeAll() {
   const sub = (key, q, fn) => {
     S.unsubs.push(onSnapshot(q, (snap) => { S.loaded[key] = true; fn(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); },
-      (err) => { console.error(key, err); S.loaded[key] = true; gNote("No se pudieron leer algunos datos (" + key + "). Si recién configuraste Firebase, revisá que las reglas estén publicadas."); fn(null); }));
+      (err) => { console.error(key, err); S.loaded[key] = true; gNote("No se pudieron leer algunos datos (" + key + "). Revisá que las reglas de Firebase estén publicadas."); fn(null); }));
   };
-  sub("legajos", query(collection(db, "legajos"), orderBy("creadoEn", "desc"), limit(1000)), (r) => { if (r) S.legajos = r; renderLegajos(); refreshLegajoSelect(); if (sheetRender) sheetRender(); });
-  sub("compras", query(collection(db, "compras"), orderBy("fecha", "desc"), limit(2000)), (r) => { if (r) S.compras = r; renderCompras(); renderResumen(); if (sheetRender) sheetRender(); });
-  sub("skus", query(collection(db, "skus"), orderBy("creadoEn", "desc"), limit(2000)), (r) => { if (r) S.skus = r; renderSkus(); refreshSkuList(); });
+  const redraw = () => { renderIngresos(); renderResumen(); if (sheetRender) sheetRender(); };
+  sub("legajos", query(collection(db, "legajos"), orderBy("creadoEn", "desc"), limit(1500)), (r) => { if (r) S.legajos = r; redraw(); });
+  sub("compras", query(collection(db, "compras"), orderBy("fecha", "desc"), limit(2000)), (r) => { if (r) S.compras = r; redraw(); });
+  sub("skus", query(collection(db, "skus"), orderBy("creadoEn", "desc"), limit(2000)), (r) => { if (r) S.skus = r; renderSkus(); const dl = $("#dlSkus"); if (dl) dl.innerHTML = S.skus.slice(0, 1500).map((s) => `<option value="${esc(s.sku)}">${esc(s.desc || "")}</option>`).join(""); });
   if (S.admin) {
-    sub("montos", query(collection(db, "comprasMontos"), limit(3000)), (r) => { if (r) S.montos = Object.fromEntries(r.map((m) => [m.id, m])); renderCompras(); renderResumen(); if (sheetRender) sheetRender(); });
+    sub("montos", query(collection(db, "comprasMontos"), limit(3000)), (r) => { if (r) S.montos = Object.fromEntries(r.map((m) => [m.id, m])); redraw(); });
     sub("usuarios", query(collection(db, "usuarios")), (r) => { if (r) S.usuarios = r; renderUsuarios(); });
   }
 }
 
-/* ================= LEGAJOS (documentación) ================= */
-let staged = [];
-function initLegajos() {
-  $("#v-legajos").innerHTML = `<div class="list">
+/* ================= editor de productos (reutilizable) ================= */
+// host: contenedor; getMon: () => "ARS"|"USD". Devuelve {items, set(arr), render()}
+function itemsEditor(host, getMon) {
+  const ed = { items: [] };
+  const nuevo = () => ({ sku: "", desc: "", cant: "", pu: "" });
+  ed.set = (arr) => { ed.items = arr && arr.length ? arr.map((x) => ({ ...x })) : [nuevo(), nuevo(), nuevo()]; ed.render(); };
+  ed.render = () => {
+    host.innerHTML = `<div class="tablewrap"><table class="items wide"><thead><tr><th class="c-sku">SKU / código</th><th>Descripción</th><th class="c-cant num">Cant.</th><th class="c-pu num">Precio unit.</th>${S.admin ? '<th class="c-sub num">Subtotal</th>' : ""}<th></th></tr></thead>
+      <tbody>${ed.items.map((it, i) => `<tr>
+        <td><input type="text" class="mono" list="dlSkus" data-i="${i}" data-k="sku" value="${esc(it.sku)}" aria-label="SKU fila ${i + 1}"></td>
+        <td><input type="text" data-i="${i}" data-k="desc" value="${esc(it.desc)}" aria-label="Descripción fila ${i + 1}"></td>
+        <td><input type="text" inputmode="decimal" class="num" data-i="${i}" data-k="cant" value="${esc(it.cant)}" aria-label="Cantidad fila ${i + 1}"></td>
+        <td><input type="text" inputmode="decimal" class="num" data-i="${i}" data-k="pu" value="${esc(it.pu)}" aria-label="Precio unitario fila ${i + 1}"></td>
+        ${S.admin ? `<td class="num" data-sub="${i}">—</td>` : ""}
+        <td><button type="button" class="btn small" data-rm="${i}" aria-label="Quitar fila">✕</button></td></tr>`).join("")}</tbody>
+      <tfoot><tr><td colspan="2">${S.admin ? "Total" : "Unidades"}</td><td class="num" data-tot="u">0</td>${S.admin ? `<td></td><td class="num" data-tot="m">0</td>` : "<td></td>"}<td></td></tr></tfoot></table></div>
+      <div class="bar" style="margin-top:8px"><button class="btn small" type="button" data-add>+ Agregar fila</button><span class="hint">Podés pegar desde Excel en la columna SKU: SKU · Descripción · Cantidad · Precio</span>${S.admin ? "" : '<span class="chip lock">Los precios solo los ve administración</span>'}</div>`;
+    ed.totales();
+  };
+  ed.totales = () => {
+    let u = 0, m = 0;
+    ed.items.forEach((it, i) => { const c = parseNum(it.cant), p = parseNum(it.pu); u += c; m += c * p; const s = host.querySelector(`[data-sub="${i}"]`); if (s) s.textContent = c && p ? fmtNum(c * p, 2) : "—"; });
+    const tu = host.querySelector('[data-tot="u"]'); if (tu) tu.textContent = fmtCant(u);
+    const tm = host.querySelector('[data-tot="m"]'); if (tm) tm.textContent = fmtMon(m, getMon());
+  };
+  ed.valid = () => ed.items.map((it) => ({ sku: String(it.sku).trim(), desc: String(it.desc).trim(), cant: parseNum(it.cant), pu: parseNum(it.pu) })).filter((it) => it.sku || it.desc);
+  host.addEventListener("input", (e) => {
+    const i = e.target.dataset.i, k = e.target.dataset.k; if (i == null) return;
+    ed.items[i][k] = e.target.value;
+    if (k === "sku") { const s = S.skus.find((x) => x.sku.toUpperCase() === e.target.value.trim().toUpperCase()); if (s && !ed.items[i].desc) { ed.items[i].desc = s.desc || ""; const d = host.querySelector(`input[data-i="${i}"][data-k=desc]`); if (d) d.value = ed.items[i].desc; } }
+    ed.totales();
+  });
+  host.addEventListener("click", (e) => {
+    if (e.target.closest("[data-add]")) { ed.items.push(nuevo()); ed.render(); [...host.querySelectorAll("input[data-k=sku]")].pop()?.focus(); return; }
+    const i = e.target.dataset.rm; if (i != null) { ed.items.splice(+i, 1); if (!ed.items.length) ed.items.push(nuevo()); ed.render(); }
+  });
+  host.addEventListener("paste", (e) => {
+    const t = e.target; if (t.dataset.k !== "sku") return;
+    const txt = (e.clipboardData || window.clipboardData).getData("text");
+    if (!/[\t\n]/.test(txt.trim())) return;
+    e.preventDefault();
+    let i = +t.dataset.i;
+    for (const line of txt.replace(/\r/g, "").split("\n").filter((l) => l.trim())) {
+      const c = line.split("\t");
+      ed.items[i] = { sku: (c[0] || "").trim(), desc: (c[1] || "").trim(), cant: (c[2] || "").trim(), pu: (c[3] || "").trim() };
+      i++;
+    }
+    ed.render();
+  });
+  ed.set([]);
+  return ed;
+}
+
+/* ================= lectura de facturas con Claude ================= */
+async function achicarImagen(file) {
+  const img = await createImageBitmap(file);
+  const k = Math.min(1, 2200 / Math.max(img.width, img.height));
+  const c = document.createElement("canvas"); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+  return await new Promise((r) => c.toBlob(r, "image/jpeg", 0.85));
+}
+const aBase64 = (blob) => new Promise((ok, mal) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result).split(",")[1]); fr.onerror = mal; fr.readAsDataURL(blob); });
+// Devuelve {fa, blob, mime, nombre} o lanza Error con mensaje para el usuario
+async function leerFactura(file, progreso) {
+  const mime0 = mimeOf(file);
+  if (!mime0) throw new Error("Formato no admitido. Usá una foto JPG/PNG o un PDF.");
+  let blob = file, mime = mime0;
+  if (mime0.startsWith("image/")) { progreso("Preparando la foto…"); blob = await achicarImagen(file); mime = "image/jpeg"; }
+  else if (file.size > 3.2 * 1048576) throw new Error("El PDF pesa más de 3 MB. Sacale una foto a la factura o mandá un PDF más liviano.");
+  progreso("Leyendo la factura… puede tardar unos 20 segundos.");
+  const token = await auth.currentUser.getIdToken();
+  const r = await fetch("/api/leer-factura", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + token }, body: JSON.stringify({ mime, data: await aBase64(blob) }) });
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(out.error || (r.status === 504 ? "La lectura tardó demasiado. Probá de nuevo." : "No se pudo leer la factura."));
+  const nombre = (file.name || "factura").replace(/\.[^.]+$/, "") + (mime === "application/pdf" ? ".pdf" : ".jpg");
+  return { fa: out.factura || {}, blob, mime, nombre };
+}
+// Convierte lo leído en filas del editor y arma el mensaje de control
+function itemsDeFactura(fa, mon) {
+  const skuSet = new Map(S.skus.map((x) => [x.sku.toUpperCase(), x]));
+  const items = (fa.items || []).map((it) => {
+    const cod = String(it.codigo || "").trim(); const known = skuSet.get(cod.toUpperCase());
+    return { sku: known ? known.sku : cod, desc: it.descripcion || known?.desc || "", cant: it.cantidad ? fmtCant(it.cantidad) : "", pu: it.precio_unitario ? fmtNum(it.precio_unitario, 2) : "" };
+  });
+  const suma = (fa.items || []).reduce((a, it) => a + (it.cantidad || 0) * (it.precio_unitario || 0), 0);
+  const cerca = (x) => x && Math.abs(suma - x) <= Math.max(1, x * 0.01);
+  const ok = !(fa.subtotal_neto || fa.total) || cerca(fa.subtotal_neto) || cerca(fa.total);
+  const avisos = [];
+  if (!ok) avisos.push(S.admin ? `La suma de los renglones (${fmtMon(suma, mon)}) no coincide con la factura (${fmtMon(fa.subtotal_neto || fa.total, mon)}). Revisá cantidades, bonificaciones o flete.` : "La suma de los renglones no coincide con la factura. Revisá cantidades y precios.");
+  if (fa.moneda === "OTRA") avisos.push("La factura está en otra moneda: elegí la moneda correcta.");
+  if (fa.observaciones) avisos.push("Nota: " + fa.observaciones);
+  const nuevos = items.filter((i) => i.sku && !skuSet.has(i.sku.toUpperCase())).length;
+  const msg = `Leí ${items.length} renglón${items.length === 1 ? "" : "es"}${nuevos ? ` (${nuevos} con código que no está en la lista de SKUs)` : ""}. Revisá y guardá. ${avisos.join(" ")}`;
+  return { items, msg, alerta: !ok || fa.moneda === "OTRA" };
+}
+const scanBox = (id) => `<div class="scan">
+  <div style="display:grid;gap:2px;min-width:0"><b>Escanear factura</b><span class="hint">Foto o PDF de la factura: completa proveedor, número, fecha y productos. Después revisás y guardás.</span></div>
+  <label class="btn primary" for="${id}">📷 Escanear</label>
+  <input type="file" id="${id}" accept="image/jpeg,image/png,image/webp,application/pdf" hidden></div>`;
+
+/* ================= INGRESOS (documentación + compra en uno) ================= */
+let staged = [], edForm = null;
+function initIngresos() {
+  $("#v-ingresos").innerHTML = `<div class="list">
     <div class="bar">
-      <button class="btn primary" id="bNuevoL" type="button">+ Nuevo legajo</button>
-      <input class="grow" type="search" id="qL" placeholder="Buscar proveedor, factura, guía, despacho…" aria-label="Buscar legajos">
+      <button class="btn primary" id="bNuevo" type="button">+ Nuevo ingreso</button>
+      <input class="grow" type="search" id="qL" placeholder="Buscar proveedor, factura, guía, despacho o SKU…" aria-label="Buscar ingresos">
       <select id="fEstado" style="width:auto" aria-label="Estado"><option value="pendiente">Pendientes</option><option value="recibido">Recibidos</option><option value="">Todos</option></select>
       <select id="fTipo" style="width:auto" aria-label="Tipo"><option value="">Todos los tipos</option><option value="local">Compra local</option><option value="courier">Courier</option><option value="contenedor">Contenedor</option></select>
+      <input type="month" id="fMes" style="width:auto" aria-label="Mes" title="Filtrar por mes (vacío = todos)">
     </div>
     <form class="panel" id="formL" hidden autocomplete="off">
-      <h2>Nuevo legajo de ingreso</h2>
+      <h2>Nuevo ingreso</h2>
+      ${scanBox("scanNuevo")}
+      <div class="note" id="scanMsg" hidden></div>
       <div class="tipos" role="radiogroup" aria-label="Tipo de ingreso">
         <label class="tipo"><input type="radio" name="tipo" value="local" checked><b>Compra local</b><span>Factura de proveedor + remito</span></label>
         <label class="tipo"><input type="radio" name="tipo" value="courier"><b>Courier internacional</b><span>Factura, guía y despacho</span></label>
         <label class="tipo"><input type="radio" name="tipo" value="contenedor"><b>Contenedor</b><span>Factura de despacho + despacho</span></label>
       </div>
       <div class="grid2">
-        <label class="f">Proveedor / origen<input type="text" id="inProv" placeholder="Ej: Ningbo Home Co."></label>
-        <label class="f">N° de factura<input type="text" id="inFact" class="mono" placeholder="Ej: A-0003-00012345"></label>
-        <label class="f">Fecha de ingreso<input type="date" id="inFecha"></label>
+        <label class="f">Proveedor / origen<input type="text" id="inProv" placeholder="Ej: Centro Estant S.A."></label>
+        <label class="f">N° de factura<input type="text" id="inFact" class="mono" placeholder="Ej: A 0012-00008441"></label>
+        <label class="f">Fecha<input type="date" id="inFecha"></label>
+        <label class="f">Moneda<select id="inMon"><option value="ARS">Pesos (ARS)</option><option value="USD">Dólares (USD)</option></select></label>
         <label class="f" data-show="courier">Empresa courier<input type="text" id="inCourier" placeholder="DHL, FedEx, UPS…"></label>
         <label class="f" data-show="courier">N° de guía (AWB)<input type="text" id="inGuia" class="mono" placeholder="Ej: 123-45678901"></label>
         <label class="f" data-show="courier contenedor">N° de despacho<input type="text" id="inDesp" class="mono" placeholder="Ej: 26001IC04012345K"></label>
         <label class="f" data-show="contenedor">N° de contenedor<input type="text" id="inCont" class="mono" placeholder="Ej: MSCU1234567"></label>
         <label class="f" data-show="contenedor">Despachante<input type="text" id="inDespachante"></label>
       </div>
-      <label class="f">Observaciones<textarea id="inNotas" placeholder="Bultos, faltantes, mercadería dañada…"></textarea></label>
+      <div style="display:grid;gap:6px"><div class="f">Productos <span class="hint">Opcional: si no los tenés ahora, se cargan después desde el ingreso.</span></div><div id="edNuevo"></div></div>
       <div style="display:grid;gap:8px">
         <div class="f" style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px">Documentos <span class="req" id="reqChips"></span></div>
         <div class="drop" id="drop"><div>Arrastrá archivos acá o</div>
@@ -201,15 +307,19 @@ function initLegajos() {
           <div class="hint">PDF, JPG, PNG o WEBP · hasta 20 MB cada uno</div></div>
         <div class="staged" id="staged"></div>
       </div>
+      <label class="f">Observaciones<textarea id="inNotas" rows="2" placeholder="Bultos, faltantes, mercadería dañada…"></textarea></label>
       <div class="note err" id="formLErr" hidden></div>
-      <div class="bar"><button class="btn primary" type="submit" id="bGuardarL">Guardar legajo</button><button class="btn" type="button" id="bCancL">Cancelar</button><span class="hint" id="progL"></span></div>
+      <div class="bar"><button class="btn primary" type="submit" id="bGuardarL">Guardar ingreso</button><button class="btn" type="button" id="bCancL">Cancelar</button><span class="hint" id="progL"></span></div>
     </form>
+    <div id="mesStats"></div>
     <div id="listL" class="list"></div>
   </div>`;
   const f = $("#formL");
-  $$("input[name=tipo]", f).forEach((r) => r.addEventListener("change", syncTipo));
-  $("#bNuevoL").onclick = () => { resetFormL(); f.hidden = false; $("#bNuevoL").hidden = true; $("#inProv").focus(); };
-  $("#bCancL").onclick = () => { resetFormL(); f.hidden = true; $("#bNuevoL").hidden = false; };
+  edForm = itemsEditor($("#edNuevo"), () => $("#inMon").value);
+  $("#inMon").addEventListener("change", () => edForm.totales());
+  $$("input[name=tipo]", f).forEach((r) => r.addEventListener("change", () => { syncTipo(); $("#inMon").value = TIPOS[tipoSel()].mon; edForm.totales(); }));
+  $("#bNuevo").onclick = () => { resetFormL(); f.hidden = false; $("#bNuevo").hidden = true; f.scrollIntoView({ block: "start" }); };
+  $("#bCancL").onclick = () => { resetFormL(); f.hidden = true; $("#bNuevo").hidden = false; };
   $("#inFiles").onchange = (e) => { addFiles([...e.target.files]); e.target.value = ""; };
   const drop = $("#drop");
   ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
@@ -217,11 +327,32 @@ function initLegajos() {
   drop.addEventListener("drop", (e) => addFiles([...(e.dataTransfer.files || [])]));
   $("#staged").addEventListener("change", (e) => { const i = e.target.dataset.i; if (i != null) { staged[i].tipoDoc = e.target.value; renderReq(); } });
   $("#staged").addEventListener("click", (e) => { const i = e.target.dataset.rm; if (i != null) { const s = staged.splice(+i, 1)[0]; if (s?.url) URL.revokeObjectURL(s.url); renderStaged(); } });
-  f.addEventListener("submit", guardarLegajo);
-  ["input", "change"].forEach((ev) => ["#qL", "#fEstado", "#fTipo"].forEach((s) => $(s).addEventListener(ev, renderLegajos)));
-  $("#listL").addEventListener("click", (e) => { const b = e.target.closest("[data-open]"); if (b) openLegajo(b.dataset.open); });
-  resetFormL(); renderLegajos();
+  $("#scanNuevo").onchange = async (e) => {
+    const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+    const lbl = $('label[for="scanNuevo"]'); lbl.classList.add("busy");
+    try {
+      const r = await leerFactura(file, (t) => scanMsg(t));
+      const fa = r.fa;
+      if (fa.proveedor) $("#inProv").value = fa.proveedor;
+      if (fa.numero) $("#inFact").value = [String(fa.tipo_comprobante || "").replace(/^Factura\s*/i, ""), fa.numero].filter(Boolean).join(" ");
+      if (/^\d{4}-\d{2}-\d{2}$/.test(fa.fecha || "")) $("#inFecha").value = fa.fecha;
+      if (fa.moneda === "USD" || fa.moneda === "ARS") $("#inMon").value = fa.moneda;
+      const x = itemsDeFactura(fa, $("#inMon").value);
+      edForm.set(x.items);
+      // la factura escaneada queda como documento del ingreso
+      staged = staged.filter((s) => !s.escaneada);
+      staged.unshift({ file: new File([r.blob], r.nombre, { type: r.mime }), mime: r.mime, tipoDoc: tipoSel() === "contenedor" ? "factura_despacho" : "factura", url: r.mime.startsWith("image/") ? URL.createObjectURL(r.blob) : null, escaneada: true });
+      renderStaged();
+      scanMsg(x.msg, x.alerta ? "err" : "");
+    } catch (err) { console.error(err); scanMsg(err.message || "No se pudo leer la factura.", "err"); }
+    finally { lbl.classList.remove("busy"); }
+  };
+  f.addEventListener("submit", guardarIngreso);
+  ["input", "change"].forEach((ev) => ["#qL", "#fEstado", "#fTipo", "#fMes"].forEach((s) => $(s).addEventListener(ev, renderIngresos)));
+  $("#listL").addEventListener("click", (e) => { const b = e.target.closest("[data-open]"); if (b) openIngreso(b.dataset.open); });
+  resetFormL(); renderIngresos();
 }
+function scanMsg(t, tipo = "") { const n = $("#scanMsg"); n.textContent = t || ""; n.className = "note" + (tipo ? " " + tipo : ""); n.hidden = !t; }
 const tipoSel = () => $("input[name=tipo]:checked").value;
 function syncTipo() { const t = tipoSel(); $$("#formL [data-show]").forEach((el) => { el.hidden = !el.dataset.show.split(" ").includes(t); }); renderReq(); }
 function renderReq() {
@@ -231,7 +362,7 @@ function renderReq() {
 function guessTipoDoc() { const t = tipoSel(); const have = new Set(staged.map((s) => s.tipoDoc)); return TIPOS[t].req.find((k) => !have.has(k)) || (t === "local" ? "remito" : "otro"); }
 function mimeOf(f) {
   if (["application/pdf", "image/jpeg", "image/png", "image/webp"].includes(f.type)) return f.type;
-  const ext = (f.name.split(".").pop() || "").toLowerCase();
+  const ext = (String(f.name || "").split(".").pop() || "").toLowerCase();
   return { pdf: "application/pdf", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp" }[ext] || null;
 }
 function addFiles(list) {
@@ -247,25 +378,42 @@ function addFiles(list) {
 const docOptions = (sel) => Object.entries(DOCS).map(([k, v]) => `<option value="${k}"${k === sel ? " selected" : ""}>${esc(v)}</option>`).join("");
 const ficon = (mime, url, lg) => `<span class="ficon${lg ? " lg" : ""}">${url ? `<img src="${esc(url)}" alt="">` : mime === "application/pdf" ? "PDF" : "IMG"}</span>`;
 function renderStaged() {
-  $("#staged").innerHTML = staged.map((s, i) => `<div class="srow">${ficon(s.mime, s.url)}<span class="nm" title="${esc(s.file.name)}">${esc(s.file.name)} <small class="hint">· ${kb(s.file.size)}</small></span><select data-i="${i}" aria-label="Tipo de documento">${docOptions(s.tipoDoc)}</select><button type="button" class="btn small" data-rm="${i}" aria-label="Quitar">✕</button></div>`).join("");
+  $("#staged").innerHTML = staged.map((s, i) => `<div class="srow">${ficon(s.mime, s.url)}<span class="nm" title="${esc(s.file.name)}">${s.escaneada ? "📷 " : ""}${esc(s.file.name)} <small class="hint">· ${kb(s.file.size)}</small></span><select data-i="${i}" aria-label="Tipo de documento">${docOptions(s.tipoDoc)}</select><button type="button" class="btn small" data-rm="${i}" aria-label="Quitar">✕</button></div>`).join("");
   renderReq();
 }
 function errL(t) { $("#formLErr").textContent = t || ""; $("#formLErr").hidden = !t; }
 function resetFormL() {
-  $("#formL").reset(); $("input[name=tipo][value=local]").checked = true; $("#inFecha").value = hoy();
-  staged.forEach((s) => s.url && URL.revokeObjectURL(s.url)); staged = []; renderStaged(); syncTipo(); errL(""); $("#progL").textContent = "";
+  $("#formL").reset(); $("input[name=tipo][value=local]").checked = true; $("#inFecha").value = hoy(); $("#inMon").value = "ARS";
+  staged.forEach((s) => s.url && URL.revokeObjectURL(s.url)); staged = []; renderStaged(); syncTipo(); errL(""); scanMsg(""); $("#progL").textContent = "";
+  edForm?.set([]);
 }
-const safeName = (n) => n.normalize("NFD").replace(/[^\w.\-]+/g, "_").slice(-80);
+const safeName = (n) => String(n).normalize("NFD").replace(/[^\w.\-]+/g, "_").slice(-80);
 async function subirArchivo(legajoId, file, mime, tipoDoc) {
-  const nombre = file.name || `factura-escaneada.${mime === "application/pdf" ? "pdf" : "jpg"}`;
+  const nombre = file.name || `factura.${mime === "application/pdf" ? "pdf" : "jpg"}`;
   const path = `legajos/${legajoId}/${Date.now()}-${safeName(nombre)}`;
   const r = await uploadBytes(sref(storage, path), file, { contentType: mime });
   return { path, nombre, tipoDoc, mime, size: r.metadata.size || file.size, ...firmar(), en: nowISO() };
 }
-async function guardarLegajo(e) {
+// Crea compras/{id} + comprasMontos/{id}. items: [{sku,desc,cant,pu}]
+function batchCompra(bt, id, { fecha, proveedor, factura, moneda, items }, existente) {
+  const f = firmar();
+  const unidades = items.reduce((a, it) => a + it.cant, 0);
+  const montos = items.map((it) => ({ pu: it.pu, subtotal: +(it.cant * it.pu).toFixed(2) }));
+  const total = +montos.reduce((a, x) => a + x.subtotal, 0).toFixed(2);
+  bt.set(doc(db, "compras", id), {
+    fecha, mes: mesDe(fecha), proveedor, factura, moneda, legajoId: id,
+    items: items.map(({ sku, desc, cant }) => ({ sku, desc, cant })), unidades,
+    creadoPor: existente?.creadoPor || f.por, creadoPorNombre: existente?.creadoPorNombre || f.porNombre, creadoEn: existente?.creadoEn || nowISO(),
+    ...(existente ? { editadoPorNombre: f.porNombre, editadoEn: nowISO() } : {}),
+  });
+  bt.set(doc(db, "comprasMontos", id), { mes: mesDe(fecha), moneda, items: montos, total, sinPrecio: items.filter((it) => !it.pu).length, creadoEn: nowISO() });
+}
+async function guardarIngreso(e) {
   e.preventDefault();
   const t = tipoSel(); const prov = $("#inProv").value.trim(), fact = $("#inFact").value.trim();
   if (!prov && !fact) return errL("Completá al menos el proveedor o el número de factura.");
+  const items = edForm.valid();
+  const sinCant = items.filter((it) => !it.cant); if (sinCant.length) return errL(`Falta la cantidad en ${sinCant.length} producto${sinCant.length > 1 ? "s" : ""}.`);
   errL(""); const b = $("#bGuardarL"); b.disabled = true;
   const id = doc(collection(db, "legajos")).id; const archivos = [];
   try {
@@ -276,78 +424,97 @@ async function guardarLegajo(e) {
       catch (err) { console.error(err); throw new Error(`No se pudo subir ${s.file.name}. Revisá la conexión y probá de nuevo.`); }
     }
     $("#progL").textContent = "Guardando…";
-    const f = firmar();
-    await setDoc(doc(db, "legajos", id), {
-      tipo: t, proveedor: prov, factura: fact, fecha: $("#inFecha").value || hoy(),
+    const f = firmar(); const fecha = $("#inFecha").value || hoy(); const moneda = $("#inMon").value;
+    const bt = writeBatch(db);
+    bt.set(doc(db, "legajos", id), {
+      tipo: t, proveedor: prov, factura: fact, fecha, moneda,
       courier: t === "courier" ? $("#inCourier").value.trim() : "", guia: t === "courier" ? $("#inGuia").value.trim() : "",
       despacho: t !== "local" ? $("#inDesp").value.trim() : "", contenedor: t === "contenedor" ? $("#inCont").value.trim() : "",
       despachante: t === "contenedor" ? $("#inDespachante").value.trim() : "", notas: $("#inNotas").value.trim(), notasOficina: "",
       estado: "pendiente", archivos, creadoPor: f.por, creadoPorNombre: f.porNombre, creadoEn: nowISO(), recibidoPor: null, recibidoPorNombre: null, recibidoEn: null,
     });
-    resetFormL(); $("#formL").hidden = true; $("#bNuevoL").hidden = false; $("#fEstado").value = "pendiente"; renderLegajos();
-  } catch (err) { errL(err.message || "No se pudo guardar. Probá de nuevo."); $("#progL").textContent = ""; }
+    if (items.length) batchCompra(bt, id, { fecha, proveedor: prov, factura: fact, moneda, items });
+    await bt.commit();
+    resetFormL(); $("#formL").hidden = true; $("#bNuevo").hidden = false; $("#fEstado").value = "pendiente"; renderIngresos();
+  } catch (err) { console.error(err); errL(err.message && !err.code ? err.message : "No se pudo guardar. Probá de nuevo."); $("#progL").textContent = ""; }
   finally { b.disabled = false; }
 }
 const faltan = (l) => { const have = new Set((l.archivos || []).map((a) => a.tipoDoc)); return (TIPOS[l.tipo] || TIPOS.local).req.filter((k) => !have.has(k)); };
-function renderLegajos() {
+function renderIngresos() {
   const el = $("#listL"); if (!el) return;
-  const q = $("#qL").value.trim().toLowerCase(), fe = $("#fEstado").value, ft = $("#fTipo").value;
-  setCount("legajos", S.legajos.filter((l) => l.estado !== "recibido").length);
-  if (!S.loaded.legajos) { el.innerHTML = `<div class="empty"><b>Cargando legajos…</b></div>`; return; }
-  if (!S.legajos.length) { el.innerHTML = `<div class="empty"><b>Todavía no hay legajos</b><span>Cuando llegue mercadería, tocá <b>+ Nuevo legajo</b>, elegí el tipo de ingreso y subí las fotos o PDF. La oficina lo ve al instante.</span></div>`; return; }
-  const rows = S.legajos.filter((l) => (!fe || l.estado === fe) && (!ft || l.tipo === ft) && (!q || [l.proveedor, l.factura, l.guia, l.despacho, l.contenedor, l.courier, l.despachante, l.notas].join(" ").toLowerCase().includes(q)));
-  if (!rows.length) { el.innerHTML = `<div class="empty"><b>Nada con ese filtro</b><span>Probá con "Todos" o borrá la búsqueda.</span></div>`; return; }
+  const q = $("#qL").value.trim().toLowerCase(), fe = $("#fEstado").value, ft = $("#fTipo").value, fm = $("#fMes").value;
+  setCount("ingresos", S.legajos.filter((l) => l.estado !== "recibido").length);
+  // franja del mes
+  const mes = fm || mesDe(hoy()); const delMes = S.legajos.filter((l) => mesDe(l.fecha) === mes);
+  let unid = 0; const tot = {};
+  delMes.forEach((l) => { const c = compraDe(l); if (c) { unid += c.unidades || 0; const m = S.admin && S.montos[c.id]; if (m) tot[m.moneda] = (tot[m.moneda] || 0) + m.total; } });
+  $("#mesStats").innerHTML = S.loaded.legajos && delMes.length ? `<div class="stats"><div class="stat"><b>${delMes.length}</b><span>Ingresos ${fmtMes(mes)}</span></div><div class="stat"><b>${fmtNum(unid)}</b><span>Unidades</span></div>${S.admin ? Object.entries(tot).map(([mon, v]) => `<div class="stat"><b>${fmtMon(v, mon)}</b><span>Total ${mon} · 🔒</span></div>`).join("") : ""}</div>` : "";
+  if (!S.loaded.legajos) { el.innerHTML = `<div class="empty"><b>Cargando ingresos…</b></div>`; return; }
+  if (!S.legajos.length) { el.innerHTML = `<div class="empty"><b>Todavía no hay ingresos</b><span>Tocá <b>+ Nuevo ingreso</b> y escaneá la factura: se completan los datos y los productos, y la factura queda guardada.</span></div>`; return; }
+  const rows = S.legajos.filter((l) => {
+    if (fe && l.estado !== fe) return false; if (ft && l.tipo !== ft) return false; if (fm && mesDe(l.fecha) !== fm) return false;
+    if (!q) return true; const c = compraDe(l);
+    return [l.proveedor, l.factura, l.guia, l.despacho, l.contenedor, l.courier, l.despachante, l.notas, ...(c?.items || []).map((i) => i.sku + " " + i.desc)].join(" ").toLowerCase().includes(q);
+  });
+  if (!rows.length) { el.innerHTML = `<div class="empty"><b>Nada con ese filtro</b><span>Probá con "Todos", otro mes o borrá la búsqueda.</span></div>`; return; }
   el.innerHTML = rows.map((l) => {
     const f = faltan(l), T = TIPOS[l.tipo] || TIPOS.local, rec = l.estado === "recibido", n = (l.archivos || []).length;
-    const ncomp = S.compras.filter((c) => c.legajoId === l.id).length;
+    const c = compraDe(l); const m = c && S.admin ? S.montos[c.id] : null;
     const ident = [l.factura && `Fact. <span class="mono">${esc(l.factura)}</span>`, l.guia && `Guía <span class="mono">${esc(l.guia)}</span>`, l.despacho && `Desp. <span class="mono">${esc(l.despacho)}</span>`, l.contenedor && `Cont. <span class="mono">${esc(l.contenedor)}</span>`].filter(Boolean).join(" · ");
     return `<button type="button" class="card${rec ? " recibido" : ""}" data-open="${esc(l.id)}">
       <div class="row1"><span style="display:flex;gap:8px;align-items:center;min-width:0;flex-wrap:wrap"><span class="chip type">${esc(T.corto)}</span><span class="ttl">${esc(l.proveedor || "Sin proveedor")}</span></span>
-      <span class="chip ${rec ? "ok" : "warn"}">${rec ? "Recibido en oficina" : "Pendiente oficina"}</span></div>
+      <span style="display:flex;gap:8px;align-items:center">${m ? `<span class="mono" style="font-weight:600">${fmtMon(m.total, m.moneda)}</span>` : ""}<span class="chip ${rec ? "ok" : "warn"}">${rec ? "Recibido" : "Pendiente oficina"}</span></span></div>
       ${ident ? `<div class="meta">${ident}</div>` : ""}
-      <div class="meta"><span>${fmtFecha(l.fecha)}</span><span>${n} archivo${n === 1 ? "" : "s"}</span><span>Cargó ${esc(l.creadoPorNombre || "—")}</span>
-      ${ncomp ? `<span class="chip info">${ncomp} compra${ncomp > 1 ? "s" : ""} vinculada${ncomp > 1 ? "s" : ""}</span>` : ""}
-      ${f.length ? `<span class="chip warn">Falta: ${f.map((k) => esc(DOCS[k])).join(", ")}</span>` : `<span class="chip ok">Documentación completa</span>`}</div></button>`;
+      <div class="meta"><span>${fmtFecha(l.fecha)}</span><span>${n} archivo${n === 1 ? "" : "s"}</span>
+      ${c ? `<span>${(c.items || []).length} producto${(c.items || []).length === 1 ? "" : "s"} · ${fmtNum(c.unidades)} u.</span>` : `<span class="chip warn">Sin productos</span>`}
+      <span>Cargó ${esc(l.creadoPorNombre || "—")}</span>
+      ${f.length ? `<span class="chip warn">Falta: ${f.map((k) => esc(DOCS[k])).join(", ")}</span>` : `<span class="chip ok">Docs completos</span>`}
+      ${m && m.sinPrecio ? `<span class="chip warn">${m.sinPrecio} sin precio</span>` : ""}</div></button>`;
   }).join("");
 }
-function openLegajo(id) {
-  const st = { confirmDel: false, confirmFile: null, msg: "" };
+function openIngreso(id) {
+  const st = { confirmDel: false, confirmFile: null, msg: "", edit: false, ed: null, scanMsg: "" };
   const urls = {};
   const draw = () => {
     const l = S.legajos.find((x) => x.id === id); const sh = $("#sheet");
-    if (!l) { sh.innerHTML = `<div class="hd"><h2>Legajo eliminado</h2><button class="btn small" data-act="close">Cerrar</button></div>`; return; }
+    if (!l) { sh.innerHTML = `<div class="hd"><h2>Ingreso eliminado</h2><button class="btn small" data-act="close">Cerrar</button></div>`; return; }
+    if (st.edit) return; // mientras se editan productos no se redibuja (no perder lo tipeado)
     const T = TIPOS[l.tipo] || TIPOS.local, rec = l.estado === "recibido", f = faltan(l);
-    const kv = [["Tipo", T.label], ["Proveedor", l.proveedor], ["N° factura", l.factura, 1], ["Fecha ingreso", fmtFecha(l.fecha)], ["Courier", l.courier], ["Guía / AWB", l.guia, 1], ["Despacho", l.despacho, 1], ["Contenedor", l.contenedor, 1], ["Despachante", l.despachante], ["Cargado por", `${l.creadoPorNombre || "—"} · ${fmtFH(l.creadoEn)}`]]
+    const c = compraDe(l); const m = c && S.admin ? S.montos[c.id] : null; const mon = c?.moneda || l.moneda || T.mon;
+    const kv = [["Tipo", T.label], ["Proveedor", l.proveedor], ["N° factura", l.factura, 1], ["Fecha", fmtFecha(l.fecha)], ["Courier", l.courier], ["Guía / AWB", l.guia, 1], ["Despacho", l.despacho, 1], ["Contenedor", l.contenedor, 1], ["Despachante", l.despachante], ["Cargado por", `${l.creadoPorNombre || "—"} · ${fmtFH(l.creadoEn)}`]]
       .filter((r) => r[1]).map((r) => `<div><dt>${r[0]}</dt><dd${r[2] ? ' class="mono"' : ""}>${esc(r[1])}</dd></div>`).join("");
     const files = (l.archivos || []).map((a, i) => {
       const img = (a.mime || "").startsWith("image/");
-      return `<div class="frow">${ficon(a.mime, img && urls[a.path] !== "pending" ? urls[a.path] : null, true)}
+      return `<div class="frow">${ficon(a.mime, img && urls[a.path] && urls[a.path] !== "pending" ? urls[a.path] : null, true)}
         <span class="txt"><a data-act="ver" data-i="${i}">${esc(DOCS[a.tipoDoc] || a.tipoDoc)}</a><small>${esc(a.nombre)} · ${kb(a.size || 0)}</small></span>
         ${S.admin ? (st.confirmFile === i ? `<button class="btn small danger" data-act="rmfile-ok" data-i="${i}">Quitar</button><button class="btn small" data-act="rmfile-no">No</button>` : `<button class="btn small" data-act="rmfile" data-i="${i}" aria-label="Quitar archivo">✕</button>`) : ""}</div>`;
     }).join("") || `<div class="hint">Sin archivos todavía.</div>`;
-    const compras = S.compras.filter((c) => c.legajoId === l.id);
+    const prodRows = (c?.items || []).map((it, i) => { const p = m?.items?.[i]; return `<tr><td class="sku">${esc(it.sku)}</td><td>${esc(it.desc)}</td><td class="num">${fmtCant(it.cant)}</td>${S.admin ? `<td class="num">${p ? fmtNum(p.pu, 2) : "—"}</td><td class="num">${p ? fmtNum(p.subtotal, 2) : "—"}</td>` : ""}</tr>`; }).join("");
     sh.innerHTML = `
-      <div class="hd"><div style="display:grid;gap:6px;min-width:0"><span style="display:flex;gap:6px;flex-wrap:wrap"><span class="chip type">${esc(T.corto)}</span><span class="chip ${rec ? "ok" : "warn"}">${rec ? "Recibido en oficina" : "Pendiente oficina"}</span></span><h2>${esc(l.proveedor || "Sin proveedor")}</h2></div>
+      <div class="hd"><div style="display:grid;gap:6px;min-width:0"><span style="display:flex;gap:6px;flex-wrap:wrap"><span class="chip type">${esc(T.corto)}</span><span class="chip type">${esc(mon)}</span><span class="chip ${rec ? "ok" : "warn"}">${rec ? "Recibido en oficina" : "Pendiente oficina"}</span></span><h2>${esc(l.proveedor || "Sin proveedor")}</h2></div>
       <button class="btn small" data-act="close">Cerrar</button></div>
       ${rec ? `<div class="note">Recibido por ${esc(l.recibidoPorNombre || "—")} · ${fmtFH(l.recibidoEn)}</div>` : ""}
       <dl class="kv">${kv}</dl>
-      ${l.notas ? `<div><div class="hint" style="font-weight:600;text-transform:uppercase;letter-spacing:.06em">Observaciones de depósito</div><div style="white-space:pre-wrap">${esc(l.notas)}</div></div>` : ""}
+      ${l.notas ? `<div><div class="hint" style="font-weight:600;text-transform:uppercase;letter-spacing:.06em">Observaciones</div><div style="white-space:pre-wrap">${esc(l.notas)}</div></div>` : ""}
+      <div class="sep"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>Productos</b>
+        ${c ? (S.admin ? `<button class="btn small" data-act="editprod">Editar productos y precios</button>` : "") : `<button class="btn small primary" data-act="editprod">+ Cargar productos</button>`}</div>
+      ${c ? `<div class="tablewrap"><table class="${S.admin ? "wide" : ""}"><thead><tr><th>SKU</th><th>Descripción</th><th class="num">Cant.</th>${S.admin ? '<th class="num">Precio unit.</th><th class="num">Subtotal</th>' : ""}</tr></thead><tbody>${prodRows}</tbody>
+        <tfoot><tr><td colspan="2">${S.admin ? "Total" : "Unidades"}</td><td class="num">${fmtNum(c.unidades)}</td>${S.admin ? `<td></td><td class="num">${m ? fmtMon(m.total, m.moneda) : "—"}</td>` : ""}</tr></tfoot></table></div>
+        ${S.admin && !m ? `<div class="note err">Este ingreso no tiene precios registrados.</div>` : ""}${!S.admin ? `<div class="note lock">Los precios de este ingreso solo los ve administración.</div>` : ""}`
+        : `<div class="hint">Todavía no se cargaron los productos de este ingreso.</div>`}
       <div class="sep"></div>
       <div style="display:flex;justify-content:space-between;flex-wrap:wrap;gap:6px;align-items:center"><b>Documentos</b>${f.length ? `<span class="chip warn">Falta: ${f.map((k) => esc(DOCS[k])).join(", ")}</span>` : `<span class="chip ok">Completo</span>`}</div>
       <div class="files">${files}</div>
       <div class="bar"><select id="addTipo" style="width:auto" aria-label="Tipo del documento a agregar">${docOptions(f[0] || "otro")}</select><label class="btn" for="addFile">+ Agregar archivos</label><input type="file" id="addFile" multiple accept="application/pdf,image/jpeg,image/png,image/webp" hidden></div>
-      <div class="sep"></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>Compras vinculadas</b><button class="btn small" data-act="nuevacompra">+ Cargar compra de este legajo</button></div>
-      ${compras.length ? `<div class="files">${compras.map((c) => `<div class="frow"><span class="txt"><a data-act="vercompra" data-id="${esc(c.id)}">${esc(c.proveedor || "Compra")} · ${fmtFecha(c.fecha)}</a><small>${(c.items || []).length} ítems · ${fmtNum(c.unidades)} unidades${S.admin && S.montos[c.id] ? " · " + fmtMon(S.montos[c.id].total, S.montos[c.id].moneda) : ""}</small></span></div>`).join("")}</div>` : `<div class="hint">Todavía no se cargó el detalle de productos de este ingreso.</div>`}
       ${st.msg ? `<div class="note${st.msg.startsWith("!") ? " err" : ""}">${esc(st.msg.replace(/^!/, ""))}</div>` : ""}
       <div class="sep"></div>
       <label class="f">Notas de oficina<textarea id="notasOf" placeholder="Ej: Ingresado en el sistema, falta NC del proveedor…">${esc(l.notasOficina || "")}</textarea></label>
       <div class="bar">
         <button class="btn primary" data-act="estado">${rec ? "Volver a pendiente" : "✓ Marcar recibido en oficina"}</button>
         <button class="btn" data-act="notas">Guardar notas</button>
-        ${S.admin ? (st.confirmDel ? `<span class="confirm">¿Eliminar legajo y sus archivos? <button class="btn small danger" data-act="del-ok">Eliminar</button><button class="btn small" data-act="del-no">Cancelar</button></span>` : `<button class="btn small danger" data-act="del" style="margin-left:auto">Eliminar</button>`) : ""}
+        ${S.admin ? (st.confirmDel ? `<span class="confirm">¿Eliminar ingreso, productos y archivos? <button class="btn small danger" data-act="del-ok">Eliminar</button><button class="btn small" data-act="del-no">Cancelar</button></span>` : `<button class="btn small danger" data-act="del" style="margin-left:auto">Eliminar</button>`) : ""}
       </div>`;
-    // miniaturas
     (l.archivos || []).forEach((a) => {
       if ((a.mime || "").startsWith("image/") && !urls[a.path]) {
         urls[a.path] = "pending";
@@ -357,302 +524,90 @@ function openLegajo(id) {
     $("#addFile").onchange = async (e) => {
       const list = [...e.target.files]; e.target.value = ""; const tipoDoc = $("#addTipo").value; const nuevos = [];
       for (const fl of list) {
-        const m = mimeOf(fl); if (!m) { st.msg = `!${fl.name}: formato no admitido.`; continue; }
+        const mm = mimeOf(fl); if (!mm) { st.msg = `!${fl.name}: formato no admitido.`; continue; }
         if (fl.size > 20 * 1048576) { st.msg = `!${fl.name}: pesa más de 20 MB.`; continue; }
         st.msg = `Subiendo ${fl.name}…`; draw();
-        try { nuevos.push(await subirArchivo(l.id, fl, m, tipoDoc)); } catch (err) { st.msg = `!No se pudo subir ${fl.name}.`; }
+        try { nuevos.push(await subirArchivo(l.id, fl, mm, tipoDoc)); } catch (err) { st.msg = `!No se pudo subir ${fl.name}.`; }
       }
       if (nuevos.length) {
         try { await updateDoc(doc(db, "legajos", l.id), { archivos: arrayUnion(...nuevos) }); if (!st.msg.startsWith("!")) st.msg = `${nuevos.length} archivo${nuevos.length > 1 ? "s" : ""} agregado${nuevos.length > 1 ? "s" : ""}.`; }
-        catch (err) { st.msg = "!No se pudo guardar el archivo en el legajo."; }
+        catch (err) { st.msg = "!No se pudo guardar el archivo en el ingreso."; }
       }
       draw();
+    };
+  };
+  // modo edición de productos dentro del ingreso
+  const drawEdit = () => {
+    const l = S.legajos.find((x) => x.id === id); const c = compraDe(l); const m = c && S.admin ? S.montos[c.id] : null;
+    const sh = $("#sheet");
+    sh.innerHTML = `<div class="hd"><div style="min-width:0"><span class="chip type">${esc((TIPOS[l.tipo] || TIPOS.local).corto)}</span><h2>${c ? "Editar productos" : "Cargar productos"} · ${esc(l.proveedor || "")}</h2></div><button class="btn small" data-act="canceledit">Cancelar</button></div>
+      ${c ? "" : scanBox("scanDet")}
+      <div class="note" id="scanMsgDet"${st.scanMsg ? "" : " hidden"}></div>
+      <label class="f" style="max-width:240px">Moneda<select id="edMon"><option value="ARS">Pesos (ARS)</option><option value="USD">Dólares (USD)</option></select></label>
+      <div id="edDet"></div>
+      <div class="note err" id="edErr" hidden></div>
+      <div class="bar"><button class="btn primary" data-act="saveprod">Guardar productos</button><button class="btn" data-act="canceledit">Cancelar</button></div>`;
+    $("#edMon").value = c?.moneda || l.moneda || (TIPOS[l.tipo] || TIPOS.local).mon;
+    st.ed = itemsEditor($("#edDet"), () => $("#edMon").value);
+    $("#edMon").onchange = () => st.ed.totales();
+    st.ed.set(c ? c.items.map((it, i) => ({ sku: it.sku, desc: it.desc, cant: fmtCant(it.cant), pu: m?.items?.[i]?.pu ? fmtNum(m.items[i].pu, 2) : "" })) : []);
+    const sm = (t, tipo = "") => { const n = $("#scanMsgDet"); n.textContent = t; n.className = "note" + (tipo ? " " + tipo : ""); n.hidden = !t; };
+    const sc = $("#scanDet");
+    if (sc) sc.onchange = async (e) => {
+      const file = e.target.files[0]; e.target.value = ""; if (!file) return;
+      const lbl = $('label[for="scanDet"]'); lbl.classList.add("busy");
+      try {
+        const r = await leerFactura(file, (t) => sm(t));
+        if (r.fa.moneda === "USD" || r.fa.moneda === "ARS") $("#edMon").value = r.fa.moneda;
+        const x = itemsDeFactura(r.fa, $("#edMon").value); st.ed.set(x.items); sm(x.msg, x.alerta ? "err" : "");
+        // guardar la factura escaneada en los documentos del ingreso
+        try { const arch = await subirArchivo(l.id, new File([r.blob], r.nombre, { type: r.mime }), r.mime, l.tipo === "contenedor" ? "factura_despacho" : "factura"); await updateDoc(doc(db, "legajos", l.id), { archivos: arrayUnion(arch) }); } catch (_) {}
+      } catch (err) { sm(err.message || "No se pudo leer la factura.", "err"); }
+      finally { lbl.classList.remove("busy"); }
     };
   };
   $("#sheet").onclick = async (e) => {
     const b = e.target.closest("[data-act]"); if (!b) return; const act = b.dataset.act;
     if (act === "close") return closeSheet();
     const l = S.legajos.find((x) => x.id === id); if (!l) return;
-    const r = doc(db, "legajos", l.id);
+    const r = doc(db, "legajos", l.id); const c = compraDe(l);
     try {
       if (act === "ver") {
         const a = l.archivos[+b.dataset.i]; const w = window.open("", "_blank");
         const u = urls[a.path] && urls[a.path] !== "pending" ? urls[a.path] : await getDownloadURL(sref(storage, a.path));
         if (w) w.location = u; else location.href = u; return;
       }
-      if (act === "vercompra") return openCompra(b.dataset.id);
-      if (act === "nuevacompra") { closeSheet(); location.hash = "#compras"; abrirFormCompra(l); return; }
-      if (act === "estado") { b.disabled = true; const f = firmar(); const aRecibir = l.estado !== "recibido"; await updateDoc(r, aRecibir ? { estado: "recibido", recibidoPor: f.por, recibidoPorNombre: f.porNombre, recibidoEn: nowISO(), notasOficina: $("#notasOf").value.trim() } : { estado: "pendiente", recibidoPor: null, recibidoPorNombre: null, recibidoEn: null }); st.msg = aRecibir ? "Marcado como recibido." : "Volvió a pendiente."; }
+      if (act === "editprod") { st.edit = true; st.msg = ""; return drawEdit(); }
+      if (act === "canceledit") { st.edit = false; return draw(); }
+      if (act === "saveprod") {
+        const items = st.ed.valid(); const err = $("#edErr");
+        if (!items.length) { err.textContent = "Agregá al menos un producto."; err.hidden = false; return; }
+        const sinCant = items.filter((it) => !it.cant).length; if (sinCant) { err.textContent = `Falta la cantidad en ${sinCant} producto${sinCant > 1 ? "s" : ""}.`; err.hidden = false; return; }
+        b.disabled = true;
+        const cid = c ? c.id : l.id; const bt = writeBatch(db);
+        batchCompra(bt, cid, { fecha: l.fecha, proveedor: l.proveedor, factura: l.factura, moneda: $("#edMon").value, items }, c);
+        if (cid !== l.id) bt.update(doc(db, "compras", cid), { legajoId: l.id });
+        await bt.commit(); st.edit = false; st.msg = "Productos guardados.";
+      }
+      else if (act === "estado") { b.disabled = true; const f = firmar(); const aRecibir = l.estado !== "recibido"; await updateDoc(r, aRecibir ? { estado: "recibido", recibidoPor: f.por, recibidoPorNombre: f.porNombre, recibidoEn: nowISO(), notasOficina: $("#notasOf").value.trim() } : { estado: "pendiente", recibidoPor: null, recibidoPorNombre: null, recibidoEn: null }); st.msg = aRecibir ? "Marcado como recibido." : "Volvió a pendiente."; }
       else if (act === "notas") { b.disabled = true; await updateDoc(r, { notasOficina: $("#notasOf").value.trim() }); st.msg = "Notas guardadas."; }
       else if (act === "del") st.confirmDel = true;
       else if (act === "del-no") st.confirmDel = false;
-      else if (act === "del-ok") { b.disabled = true; await deleteDoc(r); for (const a of l.archivos || []) try { await deleteObject(sref(storage, a.path)); } catch (_) {} return closeSheet(); }
+      else if (act === "del-ok") {
+        b.disabled = true; const bt = writeBatch(db); bt.delete(r);
+        if (c) { bt.delete(doc(db, "compras", c.id)); bt.delete(doc(db, "comprasMontos", c.id)); }
+        await bt.commit();
+        for (const a of l.archivos || []) try { await deleteObject(sref(storage, a.path)); } catch (_) {}
+        return closeSheet();
+      }
       else if (act === "rmfile") st.confirmFile = +b.dataset.i;
       else if (act === "rmfile-no") st.confirmFile = null;
       else if (act === "rmfile-ok") { const i = +b.dataset.i, a = l.archivos[i]; await updateDoc(r, { archivos: l.archivos.filter((_, j) => j !== i) }); st.confirmFile = null; try { await deleteObject(sref(storage, a.path)); } catch (_) {} st.msg = "Archivo quitado."; }
-    } catch (err) { console.error(err); st.msg = "!No se pudo guardar el cambio. Probá de nuevo."; }
-    draw();
-  };
-  openSheet(draw);
-}
-
-/* ================= COMPRAS ================= */
-let itemsF = [];
-function initCompras() {
-  $("#v-compras").innerHTML = `<div class="list">
-    <div class="bar">
-      <button class="btn primary" id="bNuevaC" type="button">+ Nueva compra</button>
-      <input class="grow" type="search" id="qC" placeholder="Buscar proveedor, factura o SKU" aria-label="Buscar compras">
-      <input type="month" id="mC" style="width:auto" aria-label="Mes">
-    </div>
-    <form class="panel" id="formC" hidden autocomplete="off">
-      <h2>Cargar compra</h2>
-      <div class="scan">
-        <div style="display:grid;gap:2px;min-width:0"><b>Escanear factura</b><span class="hint">Sacale una foto o subí el PDF y se completa todo solo. Después revisás y guardás.</span></div>
-        <label class="btn primary" for="scanFile">📷 Escanear</label>
-        <input type="file" id="scanFile" accept="image/jpeg,image/png,image/webp,application/pdf" hidden>
-      </div>
-      <div class="note" id="scanMsg" hidden></div>
-      <div class="grid2">
-        <label class="f">Fecha<input type="date" id="cFecha" required></label>
-        <label class="f">Proveedor<input type="text" id="cProv" required placeholder="Ej: Ningbo Home Co."></label>
-        <label class="f">N° de factura<input type="text" id="cFact" class="mono"></label>
-        <label class="f">Moneda<select id="cMon"><option value="ARS">Pesos (ARS)</option><option value="USD">Dólares (USD)</option></select></label>
-        <label class="f">Legajo de documentación<select id="cLeg"><option value="">— Sin vincular —</option></select></label>
-      </div>
-      <div style="display:grid;gap:6px">
-        <div class="f">Productos <span class="hint">Podés pegar desde Excel en la columna SKU: SKU · Descripción · Cantidad · Precio unitario</span></div>
-        <div class="tablewrap"><table class="items wide"><thead><tr><th class="c-sku">SKU</th><th>Descripción</th><th class="c-cant num">Cant.</th><th class="c-pu num">Precio unit.</th>${S.admin ? '<th class="c-sub num">Subtotal</th>' : ""}<th></th></tr></thead><tbody id="itemsBody"></tbody>
-        ${S.admin ? `<tfoot><tr><td colspan="2">Total</td><td class="num" id="totU">0</td><td></td><td class="num" id="totM">0</td><td></td></tr></tfoot>` : `<tfoot><tr><td colspan="2">Unidades</td><td class="num" id="totU">0</td><td colspan="2"></td></tr></tfoot>`}
-        </table></div>
-        <div class="bar"><button class="btn small" type="button" id="bAddItem">+ Agregar fila</button>${S.admin ? "" : '<span class="chip lock">Los precios quedan visibles solo para administración</span>'}</div>
-        <datalist id="dlSkus"></datalist>
-      </div>
-      <label class="f">Notas<textarea id="cNotas" rows="2"></textarea></label>
-      <div class="note err" id="formCErr" hidden></div>
-      <div class="bar"><button class="btn primary" type="submit" id="bGuardarC">Guardar compra</button><button class="btn" type="button" id="bCancC">Cancelar</button></div>
-    </form>
-    <div id="cResumenMes"></div>
-    <div id="listC" class="list"></div>
-  </div>`;
-  $("#mC").value = mesDe(hoy());
-  $("#bNuevaC").onclick = () => abrirFormCompra();
-  $("#bCancC").onclick = () => { $("#formC").hidden = true; $("#bNuevaC").hidden = false; };
-  $("#bAddItem").onclick = () => { itemsF.push(nuevoItem()); renderItems(); $$("#itemsBody input[data-k=sku]").pop()?.focus(); };
-  const body = $("#itemsBody");
-  body.addEventListener("input", (e) => {
-    const i = e.target.dataset.i, k = e.target.dataset.k; if (i == null) return;
-    itemsF[i][k] = e.target.value;
-    if (k === "sku") { const s = S.skus.find((x) => x.sku.toUpperCase() === e.target.value.trim().toUpperCase()); if (s && !itemsF[i].desc) { itemsF[i].desc = s.desc || ""; const d = $(`#itemsBody input[data-i="${i}"][data-k=desc]`); if (d) d.value = itemsF[i].desc; } }
-    totalesForm();
-  });
-  body.addEventListener("click", (e) => { const i = e.target.dataset.rm; if (i != null) { itemsF.splice(+i, 1); if (!itemsF.length) itemsF.push(nuevoItem()); renderItems(); } });
-  body.addEventListener("paste", (e) => {
-    const t = e.target; if (t.dataset.k !== "sku") return;
-    const txt = (e.clipboardData || window.clipboardData).getData("text");
-    if (!/[\t\n]/.test(txt.trim())) return;
-    e.preventDefault();
-    const lines = txt.replace(/\r/g, "").split("\n").filter((l) => l.trim());
-    let i = +t.dataset.i;
-    for (const line of lines) {
-      const c = line.split("\t");
-      if (!itemsF[i]) itemsF.push(nuevoItem());
-      itemsF[i] = { sku: (c[0] || "").trim(), desc: (c[1] || "").trim(), cant: (c[2] || "").trim(), pu: (c[3] || "").trim() };
-      i++;
+    } catch (err) {
+      console.error(err);
+      if (st.edit) { const er = $("#edErr"); if (er) { er.textContent = "No se pudo guardar. Probá de nuevo."; er.hidden = false; } b.disabled = false; return; }
+      st.msg = "!No se pudo guardar el cambio. Probá de nuevo.";
     }
-    renderItems();
-  });
-  $("#formC").addEventListener("submit", guardarCompra);
-  $("#scanFile").onchange = (e) => { const f = e.target.files[0]; e.target.value = ""; if (f) escanearFactura(f); };
-  ["input", "change"].forEach((ev) => { $("#qC").addEventListener(ev, renderCompras); $("#mC").addEventListener(ev, renderCompras); });
-  $("#listC").addEventListener("click", (e) => { const b = e.target.closest("[data-openc]"); if (b) openCompra(b.dataset.openc); });
-  renderCompras();
-}
-const nuevoItem = () => ({ sku: "", desc: "", cant: "", pu: "" });
-function refreshLegajoSelect() {
-  const sel = $("#cLeg"); if (!sel) return; const v = sel.value;
-  sel.innerHTML = `<option value="">— Sin vincular —</option>` + S.legajos.slice(0, 200).map((l) => `<option value="${esc(l.id)}">${esc(fmtFecha(l.fecha))} · ${esc(TIPOS[l.tipo]?.corto || "")} · ${esc(l.proveedor || l.factura || "Sin proveedor")}</option>`).join("");
-  sel.value = v;
-}
-function refreshSkuList() { const dl = $("#dlSkus"); if (dl) dl.innerHTML = S.skus.slice(0, 1500).map((s) => `<option value="${esc(s.sku)}">${esc(s.desc || "")}</option>`).join(""); }
-function abrirFormCompra(legajo) {
-  const f = $("#formC"); f.reset(); itemsF = [nuevoItem(), nuevoItem(), nuevoItem()];
-  $("#cFecha").value = legajo?.fecha || hoy(); refreshLegajoSelect();
-  if (legajo) { $("#cLeg").value = legajo.id; $("#cProv").value = legajo.proveedor || ""; $("#cFact").value = legajo.factura || ""; if (legajo.tipo !== "local") $("#cMon").value = "USD"; }
-  scan = null; scanMsg(""); $("#formCErr").hidden = true; renderItems(); f.hidden = false; $("#bNuevaC").hidden = true; $("#cProv").focus();
-}
-function renderItems() {
-  $("#itemsBody").innerHTML = itemsF.map((it, i) => `<tr>
-    <td><input type="text" class="mono" list="dlSkus" data-i="${i}" data-k="sku" value="${esc(it.sku)}" aria-label="SKU fila ${i + 1}"></td>
-    <td><input type="text" data-i="${i}" data-k="desc" value="${esc(it.desc)}" aria-label="Descripción fila ${i + 1}"></td>
-    <td><input type="text" inputmode="decimal" class="num" data-i="${i}" data-k="cant" value="${esc(it.cant)}" aria-label="Cantidad fila ${i + 1}"></td>
-    <td><input type="text" inputmode="decimal" class="num" data-i="${i}" data-k="pu" value="${esc(it.pu)}" aria-label="Precio unitario fila ${i + 1}"></td>
-    ${S.admin ? `<td class="num" id="sub-${i}">—</td>` : ""}
-    <td><button type="button" class="btn small" data-rm="${i}" aria-label="Quitar fila">✕</button></td></tr>`).join("");
-  totalesForm();
-}
-function totalesForm() {
-  let u = 0, m = 0;
-  itemsF.forEach((it, i) => { const c = parseNum(it.cant), p = parseNum(it.pu); u += c; m += c * p; const s = $("#sub-" + i); if (s) s.textContent = c && p ? fmtNum(c * p, 2) : "—"; });
-  $("#totU").textContent = fmtNum(u, u % 1 ? 2 : 0); const tm = $("#totM"); if (tm) tm.textContent = fmtMon(m, $("#cMon").value);
-}
-async function guardarCompra(e) {
-  e.preventDefault();
-  const err = (t) => { $("#formCErr").textContent = t; $("#formCErr").hidden = !t; };
-  const items = itemsF.map((it) => ({ sku: it.sku.trim(), desc: it.desc.trim(), cant: parseNum(it.cant), pu: parseNum(it.pu) })).filter((it) => it.sku || it.desc);
-  if (!$("#cProv").value.trim()) return err("Completá el proveedor.");
-  if (!items.length) return err("Agregá al menos un producto.");
-  const sinCant = items.filter((it) => !it.cant); if (sinCant.length) return err(`Falta la cantidad en ${sinCant.length} fila${sinCant.length > 1 ? "s" : ""}.`);
-  err(""); const b = $("#bGuardarC"); b.disabled = true;
-  try {
-    const id = doc(collection(db, "compras")).id; const f = firmar(); const fecha = $("#cFecha").value || hoy(); const moneda = $("#cMon").value;
-    let legajoId = $("#cLeg").value || null;
-    if (scan?.blob) {
-      // La factura escaneada queda guardada en el legajo (existente o uno nuevo)
-      const lid = legajoId || doc(collection(db, "legajos")).id;
-      const arch = await subirArchivo(lid, scan.blob, scan.mime, "factura");
-      if (legajoId) await updateDoc(doc(db, "legajos", lid), { archivos: arrayUnion(arch) });
-      else {
-        await setDoc(doc(db, "legajos", lid), {
-          tipo: "local", proveedor: $("#cProv").value.trim(), factura: $("#cFact").value.trim(), fecha, courier: "", guia: "", despacho: "", contenedor: "", despachante: "",
-          notas: "Creado al escanear la factura de compra.", notasOficina: "", estado: "pendiente", archivos: [arch],
-          creadoPor: f.por, creadoPorNombre: f.porNombre, creadoEn: nowISO(), recibidoPor: null, recibidoPorNombre: null, recibidoEn: null,
-        });
-        legajoId = lid;
-      }
-      scan = null;
-    }
-    const unidades = items.reduce((a, it) => a + it.cant, 0);
-    const total = items.reduce((a, it) => a + it.cant * it.pu, 0);
-    const batch = writeBatch(db);
-    batch.set(doc(db, "compras", id), {
-      fecha, mes: mesDe(fecha), proveedor: $("#cProv").value.trim(), factura: $("#cFact").value.trim(), moneda,
-      legajoId, notas: $("#cNotas").value.trim(),
-      items: items.map(({ sku, desc, cant }) => ({ sku, desc, cant })), unidades,
-      creadoPor: f.por, creadoPorNombre: f.porNombre, creadoEn: nowISO(),
-    });
-    batch.set(doc(db, "comprasMontos", id), {
-      mes: mesDe(fecha), moneda, items: items.map((it) => ({ pu: it.pu, subtotal: +(it.cant * it.pu).toFixed(2) })),
-      total: +total.toFixed(2), sinPrecio: items.filter((it) => !it.pu).length, creadoEn: nowISO(),
-    });
-    await batch.commit();
-    $("#formC").hidden = true; $("#bNuevaC").hidden = false; $("#mC").value = mesDe(fecha); renderCompras();
-  } catch (e2) { console.error(e2); err("No se pudo guardar la compra. Probá de nuevo."); }
-  finally { b.disabled = false; }
-}
-/* ---- escaneo de facturas con Claude ---- */
-let scan = null;
-function scanMsg(t, tipo = "") { const n = $("#scanMsg"); n.textContent = t || ""; n.className = "note" + (tipo ? " " + tipo : ""); n.hidden = !t; }
-async function achicarImagen(file) {
-  const img = await createImageBitmap(file);
-  const k = Math.min(1, 2200 / Math.max(img.width, img.height));
-  const c = document.createElement("canvas"); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
-  c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-  return await new Promise((r) => c.toBlob(r, "image/jpeg", 0.85));
-}
-const aBase64 = (blob) => new Promise((ok, mal) => { const fr = new FileReader(); fr.onload = () => ok(String(fr.result).split(",")[1]); fr.onerror = mal; fr.readAsDataURL(blob); });
-async function escanearFactura(file) {
-  const mime0 = mimeOf(file);
-  if (!mime0) return scanMsg("Formato no admitido. Usá una foto JPG/PNG o un PDF.", "err");
-  const lbl = $('label[for="scanFile"]'); lbl.style.pointerEvents = "none"; lbl.style.opacity = ".5";
-  try {
-    let blob = file, mime = mime0;
-    if (mime0.startsWith("image/")) { scanMsg("Preparando la foto…"); blob = await achicarImagen(file); mime = "image/jpeg"; }
-    else if (file.size > 3.2 * 1048576) return scanMsg("El PDF pesa más de 3 MB. Sacale una foto a la factura o mandá un PDF más liviano.", "err");
-    scanMsg("Leyendo la factura… puede tardar unos 20 segundos.");
-    const token = await auth.currentUser.getIdToken();
-    const r = await fetch("/api/leer-factura", { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + token }, body: JSON.stringify({ mime, data: await aBase64(blob) }) });
-    const out = await r.json().catch(() => ({}));
-    if (!r.ok) return scanMsg(out.error || "No se pudo leer la factura.", "err");
-    const fa = out.factura || {};
-    if (fa.proveedor) $("#cProv").value = fa.proveedor;
-    if (fa.numero) $("#cFact").value = [fa.tipo_comprobante, fa.numero].filter(Boolean).join(" ").replace(/^Factura /i, "");
-    if (/^\d{4}-\d{2}-\d{2}$/.test(fa.fecha || "")) $("#cFecha").value = fa.fecha;
-    if (fa.moneda === "USD" || fa.moneda === "ARS") $("#cMon").value = fa.moneda;
-    const skuSet = new Map(S.skus.map((x) => [x.sku.toUpperCase(), x]));
-    itemsF = (fa.items || []).map((it) => {
-      const cod = (it.codigo || "").trim(); const known = skuSet.get(cod.toUpperCase());
-      return { sku: known ? known.sku : cod, desc: it.descripcion || known?.desc || "", cant: it.cantidad ? fmtNum(it.cantidad, it.cantidad % 1 ? 2 : 0) : "", pu: it.precio_unitario ? fmtNum(it.precio_unitario, 2) : "" };
-    });
-    if (!itemsF.length) itemsF = [nuevoItem()];
-    renderItems();
-    scan = { blob, mime };
-    // control de sumas
-    const suma = (fa.items || []).reduce((a, it) => a + (it.cantidad || 0) * (it.precio_unitario || 0), 0);
-    const ref = fa.subtotal_neto || fa.total || 0;
-    const ok = !ref || Math.abs(suma - ref) <= Math.max(1, ref * 0.01) || (fa.total && Math.abs(suma - fa.total) <= Math.max(1, fa.total * 0.01));
-    const avisos = [];
-    if (!ok) avisos.push(S.admin ? `La suma de los ítems (${fmtMon(suma, $("#cMon").value)}) no coincide con la factura (${fmtMon(ref, $("#cMon").value)}). Revisá cantidades, bonificaciones o flete.` : "La suma de los ítems no coincide con el total de la factura. Revisá cantidades y precios antes de guardar.");
-    if (fa.moneda === "OTRA") avisos.push("La factura está en otra moneda: elegí la moneda correcta.");
-    if (fa.observaciones) avisos.push("Nota de lectura: " + fa.observaciones);
-    const nuevos = itemsF.filter((i) => i.sku && !skuSet.has(i.sku.toUpperCase())).length;
-    scanMsg(`Leí ${itemsF.length} renglón${itemsF.length === 1 ? "" : "es"}${nuevos ? ` (${nuevos} con código que no está en tu lista de SKUs)` : ""}. Revisá y tocá Guardar. ${avisos.join(" ")}`, ok && fa.moneda !== "OTRA" ? "" : "err");
-  } catch (e) { console.error(e); scanMsg("No se pudo leer la factura. Revisá la conexión y probá de nuevo.", "err"); }
-  finally { lbl.style.pointerEvents = ""; lbl.style.opacity = ""; }
-}
-function renderCompras() {
-  const el = $("#listC"); if (!el) return;
-  const q = $("#qC").value.trim().toLowerCase(), m = $("#mC").value;
-  if (!S.loaded.compras) { el.innerHTML = `<div class="empty"><b>Cargando compras…</b></div>`; return; }
-  const delMes = S.compras.filter((c) => !m || c.mes === m);
-  const rows = delMes.filter((c) => !q || [c.proveedor, c.factura, ...(c.items || []).map((i) => i.sku + " " + i.desc)].join(" ").toLowerCase().includes(q));
-  // resumen corto del mes
-  const r = $("#cResumenMes");
-  const unid = delMes.reduce((a, c) => a + (c.unidades || 0), 0);
-  let tot = "";
-  if (S.admin) {
-    const pm = {}; delMes.forEach((c) => { const mm = S.montos[c.id]; if (mm) pm[mm.moneda] = (pm[mm.moneda] || 0) + mm.total; });
-    tot = Object.entries(pm).map(([mon, v]) => `<div class="stat"><b>${fmtMon(v, mon)}</b><span>Total ${mon} · 🔒</span></div>`).join("");
-  }
-  r.innerHTML = delMes.length ? `<div class="stats"><div class="stat"><b>${delMes.length}</b><span>Compras ${m ? fmtMes(m) : ""}</span></div><div class="stat"><b>${fmtNum(unid)}</b><span>Unidades</span></div>${tot}</div>` : "";
-  if (!S.compras.length) { el.innerHTML = `<div class="empty"><b>Todavía no hay compras cargadas</b><span>Tocá <b>+ Nueva compra</b> y cargá los productos con cantidad y precio. Podés pegar la tabla directo desde Excel.</span></div>`; return; }
-  if (!rows.length) { el.innerHTML = `<div class="empty"><b>Sin compras en ${m ? fmtMes(m) : "este filtro"}</b><span>Cambiá el mes o borrá la búsqueda.</span></div>`; return; }
-  el.innerHTML = rows.map((c) => {
-    const mm = S.admin ? S.montos[c.id] : null; const leg = c.legajoId && S.legajos.find((l) => l.id === c.legajoId);
-    return `<button type="button" class="card neutral" data-openc="${esc(c.id)}">
-      <div class="row1"><span class="ttl">${esc(c.proveedor)}</span>${mm ? `<span class="mono" style="font-weight:600">${fmtMon(mm.total, mm.moneda)}</span>` : `<span class="chip type">${esc(c.moneda)}</span>`}</div>
-      <div class="meta"><span>${fmtFecha(c.fecha)}</span>${c.factura ? `<span>Fact. <span class="mono">${esc(c.factura)}</span></span>` : ""}<span>${(c.items || []).length} ítem${(c.items || []).length === 1 ? "" : "s"} · ${fmtNum(c.unidades)} u.</span><span>Cargó ${esc(c.creadoPorNombre || "—")}</span>
-      ${leg ? `<span class="chip info">Legajo ${esc(TIPOS[leg.tipo]?.corto || "")}</span>` : ""}${mm && mm.sinPrecio ? `<span class="chip warn">${mm.sinPrecio} sin precio</span>` : ""}</div></button>`;
-  }).join("");
-}
-function openCompra(id) {
-  const st = { confirmDel: false, edit: false, msg: "" };
-  const draw = () => {
-    const c = S.compras.find((x) => x.id === id); const sh = $("#sheet");
-    if (!c) { sh.innerHTML = `<div class="hd"><h2>Compra eliminada</h2><button class="btn small" data-act="close">Cerrar</button></div>`; return; }
-    const mm = S.admin ? S.montos[c.id] : null; const leg = c.legajoId && S.legajos.find((l) => l.id === c.legajoId);
-    const rows = (c.items || []).map((it, i) => {
-      const p = mm?.items?.[i];
-      return `<tr><td class="sku">${esc(it.sku)}</td><td>${esc(it.desc)}</td><td class="num">${fmtNum(it.cant, it.cant % 1 ? 2 : 0)}</td>
-      ${S.admin ? (st.edit ? `<td class="num"><input type="text" inputmode="decimal" class="num" data-pu="${i}" value="${p ? fmtNum(p.pu, 2) : ""}" style="max-width:120px"></td>` : `<td class="num">${p ? fmtNum(p.pu, 2) : "—"}</td>`) + `<td class="num">${p ? fmtNum(p.subtotal, 2) : "—"}</td>` : ""}</tr>`;
-    }).join("");
-    sh.innerHTML = `<div class="hd"><div style="min-width:0"><span class="chip type">${esc(c.moneda)}</span><h2>${esc(c.proveedor)}</h2></div><button class="btn small" data-act="close">Cerrar</button></div>
-      <dl class="kv"><div><dt>Fecha</dt><dd>${fmtFecha(c.fecha)}</dd></div>${c.factura ? `<div><dt>Factura</dt><dd class="mono">${esc(c.factura)}</dd></div>` : ""}<div><dt>Unidades</dt><dd class="mono">${fmtNum(c.unidades)}</dd></div><div><dt>Cargó</dt><dd>${esc(c.creadoPorNombre || "—")} · ${fmtFH(c.creadoEn)}</dd></div>${leg ? `<div><dt>Legajo</dt><dd><a href="#" data-act="leg">${esc(TIPOS[leg.tipo]?.corto || "")} · ${esc(leg.proveedor || leg.factura || "")}</a></dd></div>` : ""}</dl>
-      ${c.notas ? `<div style="white-space:pre-wrap">${esc(c.notas)}</div>` : ""}
-      <div class="tablewrap"><table class="${S.admin ? "wide" : ""}"><thead><tr><th>SKU</th><th>Descripción</th><th class="num">Cant.</th>${S.admin ? '<th class="num">Precio unit.</th><th class="num">Subtotal</th>' : ""}</tr></thead><tbody>${rows}</tbody>
-      ${S.admin && mm ? `<tfoot><tr><td colspan="4">Total</td><td class="num">${fmtMon(mm.total, mm.moneda)}</td></tr></tfoot>` : ""}</table></div>
-      ${!S.admin ? `<div class="note lock">Los precios de esta compra solo los ve administración.</div>` : !mm ? `<div class="note err">Esta compra no tiene montos registrados.</div>` : ""}
-      ${st.msg ? `<div class="note${st.msg.startsWith("!") ? " err" : ""}">${esc(st.msg.replace(/^!/, ""))}</div>` : ""}
-      ${S.admin ? `<div class="bar">${st.edit ? `<button class="btn primary" data-act="savepu">Guardar precios</button><button class="btn" data-act="canceledit">Cancelar</button>` : `<button class="btn" data-act="edit">Editar precios</button>`}
-        ${st.confirmDel ? `<span class="confirm">¿Eliminar esta compra? <button class="btn small danger" data-act="del-ok">Eliminar</button><button class="btn small" data-act="del-no">No</button></span>` : `<button class="btn small danger" data-act="del" style="margin-left:auto">Eliminar compra</button>`}</div>` : ""}`;
-  };
-  $("#sheet").onclick = async (e) => {
-    const b = e.target.closest("[data-act]"); if (!b) return; e.preventDefault(); const act = b.dataset.act;
-    if (act === "close") return closeSheet();
-    const c = S.compras.find((x) => x.id === id); if (!c) return;
-    try {
-      if (act === "leg") return openLegajo(c.legajoId);
-      if (act === "edit") st.edit = true;
-      else if (act === "canceledit") st.edit = false;
-      else if (act === "savepu") {
-        const items = (c.items || []).map((it, i) => { const pu = parseNum($(`[data-pu="${i}"]`).value); return { pu, subtotal: +(it.cant * pu).toFixed(2) }; });
-        const total = +items.reduce((a, x) => a + x.subtotal, 0).toFixed(2);
-        await setDoc(doc(db, "comprasMontos", c.id), { mes: c.mes, moneda: c.moneda, items, total, sinPrecio: items.filter((x) => !x.pu).length, editadoEn: nowISO(), creadoEn: S.montos[c.id]?.creadoEn || nowISO() });
-        st.edit = false; st.msg = "Precios guardados.";
-      } else if (act === "del") st.confirmDel = true;
-      else if (act === "del-no") st.confirmDel = false;
-      else if (act === "del-ok") { const bt = writeBatch(db); bt.delete(doc(db, "compras", c.id)); bt.delete(doc(db, "comprasMontos", c.id)); await bt.commit(); return closeSheet(); }
-    } catch (err) { console.error(err); st.msg = "!No se pudo guardar el cambio."; }
     draw();
   };
   openSheet(draw);
@@ -664,7 +619,7 @@ function initSkus() {
   $("#v-skus").innerHTML = `<div style="display:grid;gap:14px">
     <form class="panel" id="formSku" autocomplete="off">
       <h2>Agregar SKUs para publicar en Mercado Libre</h2>
-      <label class="f">SKUs<textarea id="inSkus" class="mono" rows="4" placeholder="Uno por línea. Descripción opcional después de ; o tab:&#10;NVK-SILLA-ERG-01; Silla ergonómica negra&#10;NVK-MESA-ELV-120"></textarea>
+      <label class="f">SKUs<textarea id="inSkus" class="mono" rows="4" placeholder="Uno por línea. Descripción opcional después de ; o tab:&#10;L9BL; Biblioteca L9 Blanco&#10;SC80BL"></textarea>
         <span class="hint">Pegá directo desde Excel: primera columna SKU, segunda descripción. Los repetidos se saltean.</span></label>
       <div class="bar"><button class="btn primary" type="submit" id="bAddSku">Agregar</button><span class="hint" id="skuMsg"></span></div>
     </form>
@@ -757,8 +712,8 @@ function renderResumen() {
   $("#rStats").innerHTML = `<div class="stats">
     ${["ARS", "USD"].map((mon) => `<div class="stat"><b>${fmtMon(tot[mon] || 0, mon)}</b><span>Total ${mon} · ${fmtMes(m)}</span></div>`).join("")}
     <div class="stat"><b>${del.length}</b><span>Compras</span></div><div class="stat"><b>${fmtNum(unid)}</b><span>Unidades compradas</span></div></div>
-    ${sinP ? `<div class="note err" style="margin-top:10px">${sinP} ítem${sinP > 1 ? "s" : ""} de este mes no tienen precio cargado.</div>` : ""}`;
-  // barras 12 meses
+    ${sinP ? `<div class="note err" style="margin-top:10px">${sinP} producto${sinP > 1 ? "s" : ""} de este mes no tienen precio cargado.</div>` : ""}
+    <div class="hint" style="margin-top:8px">Montos netos tal como se cargaron (sin IVA ni percepciones si la factura los discrimina).</div>`;
   const [y, mm0] = m.split("-").map(Number); const meses = [];
   for (let i = 11; i >= 0; i--) { const d = new Date(y, mm0 - 1 - i, 1); meses.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`); }
   const porMes = (mon) => meses.map((k) => S.compras.filter((c) => c.mes === k).reduce((a, c) => a + (S.montos[c.id]?.moneda === mon ? S.montos[c.id].total : 0), 0));
@@ -766,11 +721,9 @@ function renderResumen() {
     const v = porMes(mon); const max = Math.max(...v, 0); if (!max) return `<div class="hint">Sin compras en ${mon} en los últimos 12 meses.</div>`;
     return `<div style="display:grid;gap:6px"><b class="hint" style="font-weight:600">${mon}</b><div class="bars">${meses.map((k, i) => `<div class="b${k === m ? " cur" : ""}"><span class="mono">${fmtMes(k)}</span><span class="track"><span class="fill" style="display:block;width:${(v[i] / max) * 100}%"></span></span><span class="num">${v[i] ? fmtNum(v[i]) : "—"}</span></div>`).join("")}</div></div>`;
   }).join('<div class="sep" style="margin:10px 0"></div>');
-  // proveedores
   const pv = {}; del.forEach((c) => { const k = c.proveedor || "—"; const mm = S.montos[c.id]; pv[k] ??= { n: 0, u: 0, ARS: 0, USD: 0 }; pv[k].n++; pv[k].u += c.unidades || 0; if (mm) pv[k][mm.moneda] += mm.total; });
   const pvs = Object.entries(pv).sort((a, b) => b[1].USD - a[1].USD || b[1].ARS - a[1].ARS);
   $("#rProv").innerHTML = pvs.length ? `<div class="tablewrap"><table><thead><tr><th>Proveedor</th><th class="num">Compras</th><th class="num">Unid.</th><th class="num">ARS</th><th class="num">USD</th></tr></thead><tbody>${pvs.map(([k, v]) => `<tr><td>${esc(k)}</td><td class="num">${v.n}</td><td class="num">${fmtNum(v.u)}</td><td class="num">${v.ARS ? fmtNum(v.ARS) : "—"}</td><td class="num">${v.USD ? fmtNum(v.USD) : "—"}</td></tr>`).join("")}</tbody></table></div>` : `<div class="hint">Sin compras en ${fmtMes(m)}.</div>`;
-  // SKUs
   const sk = {}; del.forEach((c) => { const mm = S.montos[c.id]; (c.items || []).forEach((it, i) => { const k = it.sku || it.desc || "—"; sk[k] ??= { desc: it.desc, u: 0, ARS: 0, USD: 0 }; sk[k].u += it.cant || 0; if (mm?.items?.[i]) sk[k][mm.moneda] += mm.items[i].subtotal || 0; }); });
   const sks = Object.entries(sk).sort((a, b) => b[1].u - a[1].u);
   $("#rSku").innerHTML = sks.length ? `<div class="tablewrap"><table class="wide"><thead><tr><th>SKU</th><th>Descripción</th><th class="num">Unidades</th><th class="num">Costo prom.</th><th class="num">ARS</th><th class="num">USD</th></tr></thead><tbody>${sks.map(([k, v]) => { const mon = v.USD ? "USD" : "ARS"; const cp = v.u ? (v.USD || v.ARS) / v.u : 0; return `<tr><td class="sku">${esc(k)}</td><td>${esc(v.desc || "")}</td><td class="num">${fmtNum(v.u)}</td><td class="num">${cp ? (mon === "USD" ? "US$ " : "$ ") + fmtNum(cp, 2) : "—"}</td><td class="num">${v.ARS ? fmtNum(v.ARS) : "—"}</td><td class="num">${v.USD ? fmtNum(v.USD) : "—"}</td></tr>`; }).join("")}</tbody></table></div>` : `<div class="hint">Sin productos comprados en ${fmtMes(m)}.</div>`;

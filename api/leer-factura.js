@@ -78,19 +78,24 @@ export default async function handler(req, res) {
         max_tokens: 8000,
         system: "Sos un asistente de administración de una importadora argentina. Leés facturas de compra (locales A/B/C, commercial invoices en inglés o chino, facturas de courier y de despacho de aduana) y extraés los datos con exactitud. Copiá números y códigos tal cual figuran; no inventes renglones ni completes datos que no se ven. Los números van como números (sin separadores de miles). Si algo no se lee bien, decilo en observaciones.",
         tools: [{ name: "registrar_factura", description: "Registra los datos extraídos de la factura", input_schema: SCHEMA }],
-        tool_choice: { type: "tool", name: "registrar_factura" },
-        messages: [{ role: "user", content: [archivo, { type: "text", text: "Extraé los datos de esta factura de compra, incluyendo todos los renglones de productos." }] }],
+        tool_choice: { type: "auto" },
+        messages: [{ role: "user", content: [archivo, { type: "text", text: "Extraé los datos de esta factura de compra, incluyendo todos los renglones de productos, y registralos llamando a la herramienta registrar_factura. Respondé solo con esa llamada." }] }],
       }),
     });
     const out = await r.json();
     if (!r.ok) {
       console.error("anthropic", r.status, out?.error);
-      const msg = r.status === 401 ? "La API key de Anthropic no es válida." : r.status === 429 ? "Demasiadas lecturas seguidas. Esperá un minuto." : out?.error?.message?.includes("credit") ? "No hay crédito en la cuenta de Anthropic." : "No se pudo leer la factura.";
+      const msg = r.status === 400 ? "Error de configuración del lector (" + (out?.error?.message || "400") + ")." : r.status === 401 ? "La API key de Anthropic no es válida." : r.status === 429 ? "Demasiadas lecturas seguidas. Esperá un minuto." : out?.error?.message?.includes("credit") ? "No hay crédito en la cuenta de Anthropic." : "No se pudo leer la factura.";
       return res.status(502).json({ error: msg });
     }
     const tool = (out.content || []).find((c) => c.type === "tool_use");
-    if (!tool) return res.status(502).json({ error: "No se pudo interpretar la factura." });
-    return res.status(200).json({ factura: tool.input });
+    if (tool) return res.status(200).json({ factura: tool.input });
+    // Respaldo: si respondió en texto, buscar un JSON
+    const txt = (out.content || []).filter((c) => c.type === "text").map((c) => c.text).join("\n");
+    const m = txt.match(/\{[\s\S]*\}/);
+    if (m) { try { return res.status(200).json({ factura: JSON.parse(m[0]) }); } catch {} }
+    console.error("sin tool_use", out.stop_reason, txt.slice(0, 300));
+    return res.status(502).json({ error: "No se pudo interpretar la factura. Probá con una foto más nítida." });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "Error al leer la factura. Probá de nuevo." });
