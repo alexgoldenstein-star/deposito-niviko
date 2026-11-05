@@ -123,11 +123,14 @@ function renderShell() {
   app.innerHTML = `
   <header class="top"><div class="wrap">
     <div class="brand"><h1><span class="tag">NIVIKO</span> Depósito</h1>
-      <div class="who"><span>${esc(S.perfil.nombre || S.user.email)}${S.admin ? ' <span class="chip lock">Admin</span>' : ""}</span><button class="btn small" id="bSalir">Salir</button></div></div>
+      <div class="who"><button class="btn small primary" id="bInstalar" hidden>Instalar app</button><span>${esc(S.perfil.nombre || S.user.email)}${S.admin ? ' <span class="chip lock">Admin</span>' : ""}</span><button class="btn small" id="bSalir">Salir</button></div></div>
     <nav class="tabs" aria-label="Secciones">${tabs.map((t) => `<a href="#${t.id}" data-tab="${t.id}"${t.admin ? ' class="adm"' : ""}>${t.label}<span class="count" id="cnt-${t.id}" hidden></span></a>`).join("")}</nav>
   </div></header>
   <div class="wrap"><main>
     <div class="note err" id="gNote" hidden></div>
+    <div class="note" id="offNote" hidden>Sin conexión. Podés ver y cargar datos; se sincronizan solos cuando vuelva la señal. Los archivos y el escaneo necesitan conexión.</div>
+    <div class="note" id="updNote" hidden>Hay una versión nueva de la app. <button class="btn small primary" id="bUpd">Actualizar</button></div>
+    <div class="note" id="iosNote" hidden>Para usarla como app: tocá <b>Compartir</b> <span aria-hidden="true">⬆︎</span> y después <b>Agregar a inicio</b>. <button class="btn small" id="bIosOk">Entendido</button></div>
     <section id="v-ingresos"></section>
     <section id="v-skus" hidden></section>
     ${S.admin ? `<section id="v-resumen" hidden></section><section id="v-usuarios" hidden></section>` : ""}
@@ -140,6 +143,39 @@ function renderShell() {
   if (S.admin) { initResumen(); initUsuarios(); }
   window.onhashchange = route; route();
   subscribeAll();
+  pwaUI();
+  if (new URLSearchParams(location.search).get("nuevo")) { history.replaceState(null, "", "/#ingresos"); $("#bNuevo").click(); }
+}
+
+/* ================= PWA: instalación, actualización y modo sin conexión ================= */
+let installEvt = null, swWaiting = null;
+addEventListener("beforeinstallprompt", (e) => { e.preventDefault(); installEvt = e; const b = $("#bInstalar"); if (b) b.hidden = false; });
+addEventListener("appinstalled", () => { installEvt = null; const b = $("#bInstalar"); if (b) b.hidden = true; });
+if ("serviceWorker" in navigator && location.hostname !== "localhost") {
+  addEventListener("load", async () => {
+    try {
+      const reg = await navigator.serviceWorker.register("/sw.js");
+      const avisar = (w) => { swWaiting = w; const n = $("#updNote"); if (n) n.hidden = false; };
+      if (reg.waiting && navigator.serviceWorker.controller) avisar(reg.waiting);
+      reg.addEventListener("updatefound", () => { const w = reg.installing; w?.addEventListener("statechange", () => { if (w.state === "installed" && navigator.serviceWorker.controller) avisar(w); }); });
+      setInterval(() => reg.update().catch(() => {}), 30 * 60 * 1000);
+      let recargado = false;
+      navigator.serviceWorker.addEventListener("controllerchange", () => { if (!recargado) { recargado = true; location.reload(); } });
+    } catch (e) { console.warn("SW", e); }
+  });
+}
+function pwaUI() {
+  const b = $("#bInstalar"); b.hidden = !installEvt;
+  b.onclick = async () => { if (!installEvt) return; installEvt.prompt(); await installEvt.userChoice.catch(() => {}); installEvt = null; b.hidden = true; };
+  if (swWaiting) $("#updNote").hidden = false;
+  $("#bUpd").onclick = () => swWaiting?.postMessage("skipWaiting");
+  const standalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone;
+  const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+  let visto = false; try { visto = localStorage.getItem("iosInstallVisto") === "1"; } catch (_) {}
+  if (ios && !standalone && !visto) $("#iosNote").hidden = false;
+  $("#bIosOk").onclick = () => { $("#iosNote").hidden = true; try { localStorage.setItem("iosInstallVisto", "1"); } catch (_) {} };
+  const off = () => { $("#offNote").hidden = navigator.onLine; };
+  addEventListener("online", off); addEventListener("offline", off); off();
 }
 function route() {
   const ids = TABS.filter((t) => !t.admin || S.admin).map((t) => t.id);
@@ -308,8 +344,9 @@ function itemsDeFactura(fa, mon) {
   return { items, imp, msg, alerta: !okNeto || !okTot || fa.moneda === "OTRA" };
 }
 const scanBox = (id) => `<div class="scan">
-  <div style="display:grid;gap:2px;min-width:0"><b>Escanear factura</b><span class="hint">Foto o PDF de la factura: completa proveedor, número, fecha y productos. Después revisás y guardás.</span></div>
-  <label class="btn primary" for="${id}">📷 Escanear</label>
+  <div style="display:grid;gap:2px;min-width:0"><b>Escanear factura</b><span class="hint">Foto o PDF de la factura: completa proveedor, número, fecha, productos e impuestos. Después revisás y guardás.</span></div>
+  <span class="bar"><label class="btn primary" for="${id}Cam">📷 Sacar foto</label><label class="btn" for="${id}">PDF / galería</label></span>
+  <input type="file" id="${id}Cam" accept="image/*" capture="environment" hidden>
   <input type="file" id="${id}" accept="image/jpeg,image/png,image/webp,application/pdf" hidden></div>`;
 
 /* ================= INGRESOS (documentación + compra en uno) ================= */
@@ -372,9 +409,10 @@ function initIngresos() {
   drop.addEventListener("drop", (e) => addFiles([...(e.dataTransfer.files || [])]));
   $("#staged").addEventListener("change", (e) => { const i = e.target.dataset.i; if (i != null) { staged[i].tipoDoc = e.target.value; renderReq(); } });
   $("#staged").addEventListener("click", (e) => { const i = e.target.dataset.rm; if (i != null) { const s = staged.splice(+i, 1)[0]; if (s?.url) URL.revokeObjectURL(s.url); renderStaged(); } });
+  $("#scanNuevoCam").onchange = (e) => $("#scanNuevo").onchange(e);
   $("#scanNuevo").onchange = async (e) => {
     const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-    const lbl = $('label[for="scanNuevo"]'); lbl.classList.add("busy");
+    const lbl = $("#formL .scan"); lbl.classList.add("busy");
     try {
       const r = await leerFactura(file, (t) => scanMsg(t));
       const fa = r.fa;
@@ -604,9 +642,10 @@ function openIngreso(id) {
     st.ed.set(c ? c.items.map((it, i) => ({ sku: it.sku, desc: it.desc, cant: fmtCant(it.cant), pu: m?.items?.[i]?.pu ? fmtNum(m.items[i].pu, 2) : "", iva: String(m?.items?.[i]?.iva ?? 21).replace(".", ",") })) : [], (m?.impuestos || []).map((t) => ({ concepto: t.concepto, alicuota: t.alicuota != null ? String(t.alicuota).replace(".", ",") : "", importe: fmtNum(t.importe, 2) })));
     const sm = (t, tipo = "") => { const n = $("#scanMsgDet"); n.textContent = t; n.className = "note" + (tipo ? " " + tipo : ""); n.hidden = !t; };
     const sc = $("#scanDet");
+    if (sc) $("#scanDetCam").onchange = (e) => sc.onchange(e);
     if (sc) sc.onchange = async (e) => {
       const file = e.target.files[0]; e.target.value = ""; if (!file) return;
-      const lbl = $('label[for="scanDet"]'); lbl.classList.add("busy");
+      const lbl = $("#sheet .scan"); lbl.classList.add("busy");
       try {
         const r = await leerFactura(file, (t) => sm(t));
         if (r.fa.moneda === "USD" || r.fa.moneda === "ARS") $("#edMon").value = r.fa.moneda;
