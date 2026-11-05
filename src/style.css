@@ -155,3 +155,16 @@ table.items .c-sub{width:15%}
 @media (prefers-reduced-motion:no-preference){.btn,.card{transition:border-color .15s,filter .15s}}
 .scan{display:flex;flex-wrap:wrap;gap:12px;align-items:center;justify-content:space-between;background:var(--sunk);border:1.5px dashed var(--accent);border-radius:10px;padding:12px 14px}
 .busy{pointer-events:none;opacity:.5}
+table.items .c-iva{width:8%}
+.imp{display:grid;gap:8px;margin-top:12px;padding-top:12px;border-top:1px dashed var(--line)}
+.improws{display:grid;gap:6px}
+.improw{display:grid;grid-template-columns:1fr 80px 150px auto;gap:6px;align-items:center}
+.improw input{padding:7px 8px;border-radius:6px}
+.totbox{display:flex;flex-wrap:wrap;gap:6px 18px;justify-content:flex-end;padding:10px 12px;background:var(--sunk);border-radius:8px}
+.totbox div{display:grid;text-align:right}
+.totbox span{font-size:.72rem;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.totbox b{font-family:var(--f-mono);font-weight:500;font-variant-numeric:tabular-nums}
+.totbox .big b{font-size:1.15rem;font-weight:600}
+tr.grand td{font-weight:700;font-size:1.02rem}
+.stat small{font-size:.75rem}
+@media (max-width:560px){.improw{grid-template-columns:1fr 64px 1fr auto}}
