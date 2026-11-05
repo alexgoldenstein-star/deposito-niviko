@@ -49,15 +49,31 @@ const diasDeCond = (c) => { const x = String(c || "").match(/(\d+)\s*d/i); retur
 const sumarDias = (f, d) => { if (!f || d == null || d === "") return ""; const x = new Date(f + "T12:00:00"); x.setDate(x.getDate() + +d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; };
 const diasHasta = (f) => (f ? Math.round((new Date(f + "T12:00:00") - new Date(hoy() + "T12:00:00")) / 864e5) : null);
 const pagadoDe = (m) => (m?.pagos || []).reduce((a, p) => a + (p.importe || 0), 0);
+const enCirculacion = (m) => (m?.pagos || []).filter((p) => p.estado === "enviado");
 const saldoDe = (m) => +(totF(m) - pagadoDe(m)).toFixed(2);
-const estaPagado = (m) => m && totF(m) > 0 && saldoDe(m) <= 0.5;
+const estaPagado = (m) => m && totF(m) > 0 && saldoDe(m) <= 0.5; // cubierto (pagado o con cheques enviados)
+// "pendiente" | "parcial" | "enviado" (cubierto con cheques sin cobrar) | "pagado"
+const estadoPago = (m) => !m || !pagadoDe(m) ? "pendiente" : !estaPagado(m) ? "parcial" : enCirculacion(m).length ? "enviado" : "pagado";
+const esCheque = (medio) => /cheq/i.test(medio || "");
 function chipVence(l, m) {
-  if (m && estaPagado(m)) return `<span class="chip ok">Pagado</span>`;
+  if (S.admin && m) { const e = estadoPago(m); if (e === "pagado") return `<span class="chip ok">Pagado</span>`; if (e === "enviado") return `<span class="chip info">Cheques enviados</span>`; }
   if (!l.vencimiento) return l.condicionPago ? `<span class="chip">${esc(l.condicionPago)}</span>` : "";
   if (!S.admin) return `<span class="chip">Vence ${fmtFecha(l.vencimiento).slice(0, 5)}</span>`; // el estado de pago solo lo ve administración
   const d = diasHasta(l.vencimiento);
   const txt = d < 0 ? `Vencido hace ${-d} d` : d === 0 ? "Vence hoy" : `Vence ${fmtFecha(l.vencimiento).slice(0, 5)} · ${d} d`;
-  return `<span class="chip ${d < 0 ? "warn strong" : d <= 7 ? "warn" : "info"}">${txt}</span>`;
+  return `<span class="chip ${d < 0 ? "warn strong" : d <= 7 ? "warn" : "info"}">${txt}${m && estadoPago(m) === "parcial" ? " · parcial" : ""}</span>`;
+}
+async function guardarPagos(compraId, pagos) {
+  const mm = S.montos[compraId]; const pagado = +pagos.reduce((a, x) => a + (x.importe || 0), 0).toFixed(2);
+  const tmp = { ...mm, pagos };
+  await updateDoc(doc(db, "comprasMontos", compraId), { pagos, pagado, estadoPago: estadoPago(tmp) });
+}
+// Proveedores: nombre normalizado para encontrar la condición configurada
+const normProv = (n) => String(n || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\b(s\.?\s?a\.?|s\.?\s?r\.?\s?l\.?|s\.?\s?a\.?\s?s\.?|sociedad anonima|srl|sa|sas)\b/g, " ").replace(/[^a-z0-9]+/g, " ").trim();
+const soloDig = (x) => String(x || "").replace(/\D/g, "");
+function provDe(nombre, cuit) {
+  const c = soloDig(cuit), n = normProv(nombre);
+  return S.proveedores.find((p) => c && soloDig(p.cuit) === c) || (n && S.proveedores.find((p) => normProv(p.nombre) === n || (p.alias || []).includes(n))) || null;
 }
 const condOptions = (sel) => CONDS.map((c) => `<option${c === sel ? " selected" : ""}>${c}</option>`).join("");
 const pctTxt = (n) => fmtNum(n, n % 1 ? 2 : 0) + "%";
@@ -66,8 +82,8 @@ const CONCEPTOS = ["IVA 21%", "IVA 10,5%", "IVA 27%", "Perc. IIBB CABA", "Perc. 
 /* ================= estado ================= */
 const S = {
   user: null, perfil: null, admin: false,
-  legajos: [], compras: [], montos: {}, skus: [], usuarios: [],
-  loaded: { legajos: false, compras: false, skus: false, montos: false, usuarios: false },
+  legajos: [], compras: [], montos: {}, skus: [], usuarios: [], proveedores: [],
+  loaded: { legajos: false, compras: false, skus: false, montos: false, usuarios: false, proveedores: false },
   unsubs: [],
 };
 const app = $("#app");
@@ -140,6 +156,7 @@ const TABS = [
   { id: "ingresos", label: "Ingresos" },
   { id: "skus", label: "SKUs ML" },
   { id: "pagos", label: "Pagos", admin: true },
+  { id: "proveedores", label: "Proveedores", admin: true },
   { id: "resumen", label: "Resumen", admin: true },
   { id: "usuarios", label: "Usuarios", admin: true },
 ];
@@ -158,14 +175,14 @@ function renderShell() {
     <div class="note" id="iosNote" hidden>Para usarla como app: tocá <b>Compartir</b> <span aria-hidden="true">⬆︎</span> y después <b>Agregar a inicio</b>. <button class="btn small" id="bIosOk">Entendido</button></div>
     <section id="v-ingresos"></section>
     <section id="v-skus" hidden></section>
-    ${S.admin ? `<section id="v-pagos" hidden></section><section id="v-resumen" hidden></section><section id="v-usuarios" hidden></section>` : ""}
+    ${S.admin ? `<section id="v-pagos" hidden></section><section id="v-proveedores" hidden></section><section id="v-resumen" hidden></section><section id="v-usuarios" hidden></section>` : ""}
   </main></div>
-  <datalist id="dlSkus"></datalist>
+  <datalist id="dlSkus"></datalist><datalist id="dlProv"></datalist>
   <div class="ov" id="ov" hidden><div class="sheet" id="sheet" role="dialog" aria-modal="true"></div></div>`;
   $("#bSalir").onclick = () => signOut(auth);
   $("#ov").addEventListener("click", (e) => { if (e.target.id === "ov") closeSheet(); });
   initIngresos(); initSkus();
-  if (S.admin) { initPagos(); initResumen(); initUsuarios(); }
+  if (S.admin) { initPagos(); initProveedores(); initResumen(); initUsuarios(); }
   window.onhashchange = route; route();
   subscribeAll();
   pwaUI();
@@ -223,9 +240,10 @@ function subscribeAll() {
     S.unsubs.push(onSnapshot(q, (snap) => { S.loaded[key] = true; fn(snap.docs.map((d) => ({ id: d.id, ...d.data() }))); },
       (err) => { console.error(key, err); S.loaded[key] = true; gNote("No se pudieron leer algunos datos (" + key + "). Revisá que las reglas de Firebase estén publicadas."); fn(null); }));
   };
-  const redraw = () => { renderIngresos(); renderResumen(); renderPagos(); if (sheetRender) sheetRender(); };
+  const redraw = () => { renderIngresos(); renderResumen(); renderPagos(); renderProveedores(); if (sheetRender) sheetRender(); };
   sub("legajos", query(collection(db, "legajos"), orderBy("creadoEn", "desc"), limit(1500)), (r) => { if (r) S.legajos = r; redraw(); });
   sub("compras", query(collection(db, "compras"), orderBy("fecha", "desc"), limit(2000)), (r) => { if (r) S.compras = r; redraw(); });
+  sub("proveedores", query(collection(db, "proveedores")), (r) => { if (r) S.proveedores = r; renderProveedores(); });
   sub("skus", query(collection(db, "skus"), orderBy("creadoEn", "desc"), limit(2000)), (r) => { if (r) S.skus = r; renderSkus(); const dl = $("#dlSkus"); if (dl) dl.innerHTML = S.skus.slice(0, 1500).map((s) => `<option value="${esc(s.sku)}">${esc(s.desc || "")}</option>`).join(""); });
   if (S.admin) {
     sub("montos", query(collection(db, "comprasMontos"), limit(3000)), (r) => { if (r) S.montos = Object.fromEntries(r.map((m) => [m.id, m])); redraw(); });
@@ -237,13 +255,15 @@ function subscribeAll() {
 // Renglón: cantidad, precio de lista, descuento (% o cascada "10+5") → unitario neto.
 // Pie: bonificación general → neto → impuestos → total factura → descuento adicional (fuera de factura) → costo efectivo.
 function itemsEditor(host, getMon) {
-  const ed = { items: [], imp: [], bonif: { pct: "", importe: "", modo: "pct" }, extra: { concepto: "", pct: "", importe: "", modo: "pct" } };
+  const ed = { items: [], imp: [], bonifs: [], bonifModo: "cascada", extra: { concepto: "", pct: "", importe: "", modo: "pct" } };
   const nuevo = () => ({ sku: "", desc: "", cant: "", lista: "", dto: "", pu: "", iva: "21" });
   ed.set = (data = {}) => {
     const arr = data.items || [];
     ed.items = arr.length ? arr.map((x) => ({ ...nuevo(), ...x })) : [nuevo(), nuevo(), nuevo()];
     ed.imp = (data.imp || []).map((x) => ({ ...x }));
-    ed.bonif = { pct: "", importe: "", modo: "pct", ...(data.bonif || {}) };
+    const bs = data.bonifs || (data.bonif ? [data.bonif] : []);
+    ed.bonifs = bs.map((b) => ({ pct: "", importe: "", modo: "pct", ...b }));
+    ed.bonifModo = data.bonifModo || "cascada";
     ed.extra = { concepto: "", pct: "", importe: "", modo: "pct", ...(data.extra || {}) };
     ed.render();
   };
@@ -251,11 +271,11 @@ function itemsEditor(host, getMon) {
   ed.calc = () => {
     let u = 0, bruto = 0; const base = {};
     ed.items.forEach((it) => { const c = parseNum(it.cant), sub = c * puDe(it); u += c; bruto += sub; const a = String(it.iva).trim() === "" ? 21 : parseNum(it.iva); base[a] = (base[a] || 0) + sub; });
-    const bonif = ed.bonif.modo === "imp" ? parseNum(ed.bonif.importe) : bruto * parseNum(ed.bonif.pct) / 100;
+    let bonif = 0; const bdet = ed.bonifs.map((b) => { const baseB = ed.bonifModo === "suma" ? bruto : bruto - bonif; const imp = b.modo === "imp" ? parseNum(b.importe) : baseB * parseNum(b.pct) / 100; bonif += imp; return { base: baseB, imp }; });
     const neto = bruto - bonif; const rate = bruto ? neto / bruto : 1;
     const imp = ed.imp.reduce((a, t) => a + parseNum(t.importe), 0);
     const extra = ed.extra.modo === "imp" ? parseNum(ed.extra.importe) : neto * parseNum(ed.extra.pct) / 100;
-    return { u, bruto, bonif, neto, rate, imp, total: neto + imp, extra, costo: neto - extra, base };
+    return { u, bruto, bonif, bdet, neto, rate, imp, total: neto + imp, extra, costo: neto - extra, base };
   };
   const inp = (attrs, val, cls = "") => `<input type="text" ${attrs} value="${esc(val ?? "")}"${cls ? ` class="${cls}"` : ""}>`;
   ed.render = () => {
@@ -273,8 +293,12 @@ function itemsEditor(host, getMon) {
         <td><button type="button" class="btn small" data-rm="${i}" aria-label="Quitar fila">✕</button></td></tr>`).join("")}</tbody></table></div>
       <div class="bar" style="margin-top:8px"><button class="btn small" type="button" data-add>+ Agregar fila</button><span class="hint">El unitario neto se calcula con lista y descuento (acepta cascada: 10+5). Pegá desde Excel: SKU · Descripción · Cant. · P. lista · Desc.</span></div>
       <div class="imp">
-        <div class="subrow"><b>Bonificación general de la factura</b>
-          <span class="pair">${inp(`inputmode="decimal" data-b="pct" placeholder="%" aria-label="Bonificación %"`, ed.bonif.pct, "num")}<span class="hint">o</span>${inp(`inputmode="decimal" data-b="importe" placeholder="Importe" aria-label="Bonificación importe"`, ed.bonif.importe, "num")}</span></div>
+        <div class="subrow"><b>Bonificaciones de la factura</b>
+          <span class="pair">${ed.bonifs.length > 1 ? `<select data-bmodo aria-label="Cómo se aplican las bonificaciones" style="width:auto"><option value="cascada"${ed.bonifModo === "cascada" ? " selected" : ""}>En cascada (cada una sobre el resto)</option><option value="suma"${ed.bonifModo === "suma" ? " selected" : ""}>Sumadas (todas sobre el subtotal)</option></select>` : ""}<button class="btn small" type="button" data-addbonif>+ Bonificación</button></span></div>
+        ${ed.bonifs.length ? `<div class="improws">${ed.bonifs.map((b, k) => `<div class="improw bon"><span class="hint" style="font-weight:600">Bonif. ${k + 1}</span>
+          ${inp(`inputmode="decimal" data-bi="${k}" data-bk="pct" placeholder="%" aria-label="Bonificación ${k + 1} %"`, b.pct, "num")}
+          ${inp(`inputmode="decimal" data-bi="${k}" data-bk="importe" placeholder="Importe" aria-label="Bonificación ${k + 1} importe"`, b.importe, "num")}
+          <button type="button" class="btn small" data-rmbonif="${k}" aria-label="Quitar bonificación">✕</button></div>`).join("")}</div>` : ""}
         <div class="bar" style="justify-content:space-between"><b>Impuestos y percepciones</b><span class="bar"><button class="btn small" type="button" data-calciva>Calcular IVA</button><button class="btn small" type="button" data-addimp>+ Agregar</button></span></div>
         ${ed.imp.length ? `<div class="improws">${ed.imp.map((t, j) => `<div class="improw">
           ${inp(`list="dlConceptos" data-j="${j}" data-k="concepto" aria-label="Concepto"`, t.concepto)}
@@ -303,7 +327,13 @@ function itemsEditor(host, getMon) {
       if (obj.modo === "pct") { const v = parseNum(obj.pct) ? fmtNum(baseVal * parseNum(obj.pct) / 100, 2) : ""; if (document.activeElement !== ii) { ii.value = v; obj.importe = v; } }
       else { const v = baseVal && parseNum(obj.importe) ? fmtNum(parseNum(obj.importe) / baseVal * 100, 2) : ""; if (document.activeElement !== pi) { pi.value = v; obj.pct = v; } }
     };
-    sync(ed.bonif, "b", r.bruto); sync(ed.extra, "x", r.neto);
+    ed.bonifs.forEach((b, k) => {
+      const pi = host.querySelector(`[data-bi="${k}"][data-bk="pct"]`), ii = host.querySelector(`[data-bi="${k}"][data-bk="importe"]`); if (!pi || !ii) return;
+      const baseB = r.bdet[k].base;
+      if (b.modo === "pct") { const v = parseNum(b.pct) ? fmtNum(baseB * parseNum(b.pct) / 100, 2) : ""; if (document.activeElement !== ii) { ii.value = v; b.importe = v; } }
+      else { const v = baseB && parseNum(b.importe) ? fmtNum(parseNum(b.importe) / baseB * 100, 2) : ""; if (document.activeElement !== pi) { pi.value = v; b.pct = v; } }
+    });
+    sync(ed.extra, "x", r.neto);
     const put = (k, v) => { const el = host.querySelector(`[data-tot="${k}"]`); if (el) el.textContent = v; };
     put("u", fmtCant(r.u)); put("bruto", fmtMon(r.bruto, mon)); put("bonif", r.bonif ? "− " + fmtMon(r.bonif, mon) : "—"); put("neto", fmtMon(r.neto, mon));
     put("imp", fmtMon(r.imp, mon)); put("total", fmtMon(r.total, mon)); put("extra", r.extra ? "− " + fmtMon(r.extra, mon) : "—"); put("costo", fmtMon(r.costo, mon));
@@ -311,13 +341,15 @@ function itemsEditor(host, getMon) {
   ed.valid = () => ed.items.map((it) => ({ sku: String(it.sku).trim(), desc: String(it.desc).trim(), cant: parseNum(it.cant), lista: parseNum(it.lista), dto: String(it.dto || "").trim(), pu: +puDe(it).toFixed(4), iva: String(it.iva).trim() === "" ? 21 : parseNum(it.iva) })).filter((it) => it.sku || it.desc);
   ed.validImp = () => ed.imp.map((t) => ({ concepto: String(t.concepto || "").trim() || "Impuesto", alicuota: String(t.alicuota ?? "").trim() === "" ? null : parseNum(t.alicuota), importe: +parseNum(t.importe).toFixed(2) })).filter((t) => t.importe);
   ed.ajustes = () => { const r = ed.calc(); return {
-    bonif: r.bonif ? { pct: +(r.bruto ? r.bonif / r.bruto * 100 : 0).toFixed(4), importe: +r.bonif.toFixed(2) } : null,
+    bonif: r.bonif ? { pct: +(r.bruto ? r.bonif / r.bruto * 100 : 0).toFixed(4), importe: +r.bonif.toFixed(2), modo: ed.bonifModo,
+      detalle: ed.bonifs.map((b, k) => ({ pct: +(r.bdet[k].base ? r.bdet[k].imp / r.bdet[k].base * 100 : 0).toFixed(4), importe: +r.bdet[k].imp.toFixed(2) })).filter((x) => x.importe) } : null,
     extra: r.extra ? { concepto: String(ed.extra.concepto || "").trim() || "Descuento adicional", pct: +(r.neto ? r.extra / r.neto * 100 : 0).toFixed(4), importe: +r.extra.toFixed(2) } : null,
   }; };
   host.addEventListener("input", (e) => {
     const d = e.target.dataset;
     if (d.j != null) { ed.imp[d.j][d.k] = e.target.value; return ed.totales(); }
-    if (d.b) { ed.bonif[d.b] = e.target.value; ed.bonif.modo = d.b === "importe" ? "imp" : "pct"; return ed.totales(); }
+    if ("bmodo" in d) { ed.bonifModo = e.target.value; ed.bonifs.forEach((b) => { if (b.modo === "imp") b.modo = "pct"; }); return ed.totales(); }
+    if (d.bi != null) { const b = ed.bonifs[d.bi]; b[d.bk] = e.target.value; b.modo = d.bk === "importe" ? "imp" : "pct"; return ed.totales(); }
     if (d.x) { ed.extra[d.x] = e.target.value; if (d.x !== "concepto") ed.extra.modo = d.x === "importe" ? "imp" : "pct"; return ed.totales(); }
     if (d.i == null) return;
     const it = ed.items[d.i]; it[d.k] = e.target.value;
@@ -330,6 +362,8 @@ function itemsEditor(host, getMon) {
   });
   host.addEventListener("click", (e) => {
     if (e.target.closest("[data-add]")) { ed.items.push(nuevo()); ed.render(); [...host.querySelectorAll("input[data-k=sku]")].pop()?.focus(); return; }
+    if (e.target.closest("[data-addbonif]")) { ed.bonifs.push({ pct: "", importe: "", modo: "pct" }); ed.render(); host.querySelector(`[data-bi="${ed.bonifs.length - 1}"][data-bk="pct"]`)?.focus(); return; }
+    const rb = e.target.dataset.rmbonif; if (rb != null) { ed.bonifs.splice(+rb, 1); ed.render(); return; }
     if (e.target.closest("[data-addimp]")) { ed.imp.push({ concepto: "", alicuota: "", importe: "" }); ed.render(); return; }
     if (e.target.closest("[data-calciva]")) {
       const r = ed.calc();
@@ -394,8 +428,11 @@ function itemsDeFactura(fa, mon) {
   });
   const imp = (Array.isArray(fa.impuestos) ? fa.impuestos : []).filter((t) => t && t.importe).map((t) => ({ concepto: t.concepto || "Impuesto", alicuota: t.alicuota != null ? String(t.alicuota).replace(".", ",") : "", importe: fmtNum(t.importe, 2) }));
   const bruto = items.reduce((a, it) => a + it._c * it._pu, 0);
-  const bonifImp = num(fa.bonificaciones) || (num(fa.bonificacion_pct) ? bruto * fa.bonificacion_pct / 100 : 0);
-  const bonif = bonifImp ? { pct: fmtNum(bruto ? bonifImp / bruto * 100 : 0, 2), importe: fmtNum(bonifImp, 2), modo: "imp" } : null;
+  // bonificaciones: detalle (1ra, 2da, 3ra…) o una sola
+  let det = (Array.isArray(fa.bonificaciones_detalle) ? fa.bonificaciones_detalle : []).filter((b) => b && (num(b.importe) || num(b.pct)));
+  if (!det.length && (num(fa.bonificaciones) || num(fa.bonificacion_pct))) det = [{ pct: num(fa.bonificacion_pct), importe: num(fa.bonificaciones) }];
+  let bonifImp = 0; const bonifs = det.map((b) => { const imp = num(b.importe) || (bruto - bonifImp) * num(b.pct) / 100; const baseB = bruto - bonifImp; bonifImp += imp; return { pct: fmtNum(baseB ? imp / baseB * 100 : 0, 2), importe: fmtNum(imp, 2), modo: "imp" }; });
+  const bonif = bonifs.length ? bonifs[0] : null;
   const neto = bruto - bonifImp;
   const impT = (Array.isArray(fa.impuestos) ? fa.impuestos : []).reduce((a, t) => a + num(t?.importe), 0);
   const cerca = (a, b) => Math.abs(a - b) <= Math.max(1, Math.abs(b) * 0.01);
@@ -413,11 +450,11 @@ function itemsDeFactura(fa, mon) {
   const nuevos = items.filter((i) => i.sku && !skuSet.has(i.sku.toUpperCase())).length;
   const partes = [`${items.length} renglón${items.length === 1 ? "" : "es"}`];
   if (conDto) partes.push(`${conDto} con descuento`);
-  if (bonif) partes.push(`bonificación general de ${S.admin ? $m(bonifImp) : bonif.pct + "%"}`);
+  if (bonifs.length) partes.push(`${bonifs.length > 1 ? bonifs.length + " bonificaciones" : "bonificación"} por ${S.admin ? $m(bonifImp) : fmtNum(bruto ? bonifImp / bruto * 100 : 0, 2) + "%"}`);
   partes.push(`${imp.length} impuesto${imp.length === 1 ? "" : "s"}`);
   const ok = okBruto && okNeto && okTot;
   const msg = `Leí ${partes.join(", ")}${nuevos ? ` (${nuevos} código${nuevos === 1 ? "" : "s"} que no están en la lista de SKUs)` : ""}. ${ok ? "Los totales cierran con la factura. " : ""}Revisá y guardá. ${avisos.join(" ")}`;
-  return { data: { items: items.map(({ _pu, _c, ...x }) => x), imp, bonif }, msg, alerta: !ok || fa.moneda === "OTRA" };
+  return { data: { items: items.map(({ _pu, _c, ...x }) => x), imp, bonifs, bonifModo: "cascada" }, msg, alerta: !ok || fa.moneda === "OTRA" };
 }
 const scanBox = (id) => `<div class="scan">
   <div style="display:grid;gap:2px;min-width:0"><b>Escanear factura</b><span class="hint">Foto o PDF de la factura: completa proveedor, número, fecha, productos e impuestos. Después revisás y guardás.</span></div>
@@ -440,13 +477,14 @@ function initIngresos() {
       <h2>Nuevo ingreso</h2>
       ${scanBox("scanNuevo")}
       <div class="note" id="scanMsg" hidden></div>
+      <div class="note lock" id="provNote" hidden></div>
       <div class="tipos" role="radiogroup" aria-label="Tipo de ingreso">
         <label class="tipo"><input type="radio" name="tipo" value="local" checked><b>Compra local</b><span>Factura de proveedor + remito</span></label>
         <label class="tipo"><input type="radio" name="tipo" value="courier"><b>Courier internacional</b><span>Factura, guía y despacho</span></label>
         <label class="tipo"><input type="radio" name="tipo" value="contenedor"><b>Contenedor</b><span>Factura de despacho + despacho</span></label>
       </div>
       <div class="grid2">
-        <label class="f">Proveedor / origen<input type="text" id="inProv" placeholder="Ej: Centro Estant S.A."></label>
+        <label class="f">Proveedor / origen<input type="text" id="inProv" list="dlProv" placeholder="Ej: Centro Estant S.A."><input type="hidden" id="inCuit"></label>
         <label class="f">N° de factura<input type="text" id="inFact" class="mono" placeholder="Ej: A 0012-00008441"></label>
         <label class="f">Fecha<input type="date" id="inFecha"></label>
         <label class="f">Condición de pago<select id="inCond"><option value="">— Sin definir —</option>${condOptions("")}</select></label>
@@ -486,6 +524,7 @@ function initIngresos() {
   $("#inFecha").addEventListener("change", recalcVenc);
   $("#inVenc").addEventListener("input", () => { vencManual = !!$("#inVenc").value; });
   window.__resetVenc = () => { vencManual = false; };
+  $("#inProv").addEventListener("change", () => aplicarProveedor());
   $$("input[name=tipo]", f).forEach((r) => r.addEventListener("change", () => { syncTipo(); $("#inMon").value = TIPOS[tipoSel()].mon; edForm.totales(); }));
   $("#bNuevo").onclick = () => { resetFormL(); f.hidden = false; $("#bNuevo").hidden = true; f.scrollIntoView({ block: "start" }); };
   $("#bCancL").onclick = () => { resetFormL(); f.hidden = true; $("#bNuevo").hidden = false; };
@@ -506,7 +545,11 @@ function initIngresos() {
       if (fa.proveedor) $("#inProv").value = fa.proveedor;
       if (fa.numero) $("#inFact").value = [String(fa.tipo_comprobante || "").replace(/^Factura\s*/i, ""), fa.numero].filter(Boolean).join(" ");
       if (/^\d{4}-\d{2}-\d{2}$/.test(fa.fecha || "")) $("#inFecha").value = fa.fecha;
+      if (fa.cuit) $("#inCuit").value = fa.cuit;
       aplicarCondicion(fa);
+      const leida = $("#inCond").value + "|" + $("#inDias").value;
+      const prov = aplicarProveedor();
+      if (prov && leida !== "|" && leida !== $("#inCond").value + "|" + $("#inDias").value) x_avisoCond = `La factura dice ${leida.replace("|", " / ")} días, pero se aplicó la condición configurada para el proveedor.`;
       if (fa.moneda === "USD" || fa.moneda === "ARS") $("#inMon").value = fa.moneda;
       const x = itemsDeFactura(fa, $("#inMon").value);
       edForm.set(x.data);
@@ -514,7 +557,7 @@ function initIngresos() {
       staged = staged.filter((s) => !s.escaneada);
       staged.unshift({ file: new File([r.blob], r.nombre, { type: r.mime }), mime: r.mime, tipoDoc: tipoSel() === "contenedor" ? "factura_despacho" : "factura", url: r.mime.startsWith("image/") ? URL.createObjectURL(r.blob) : null, escaneada: true });
       renderStaged();
-      scanMsg(x.msg, x.alerta ? "err" : "");
+      scanMsg(x.msg + (x_avisoCond ? " " + x_avisoCond : ""), x.alerta ? "err" : ""); x_avisoCond = "";
     } catch (err) { console.error(err); scanMsg(err.message || "No se pudo leer la factura.", "err"); }
     finally { lbl.classList.remove("busy"); }
   };
@@ -524,6 +567,19 @@ function initIngresos() {
   resetFormL(); renderIngresos();
 }
 // Completa condición de pago / vencimiento a partir de lo leído en la factura
+let x_avisoCond = "";
+// Si el proveedor tiene condición configurada (pestaña Proveedores), la aplica al formulario
+function aplicarProveedor() {
+  const p = provDe($("#inProv").value, $("#inCuit").value); const n = $("#provNote");
+  if (!p) { n.hidden = true; return null; }
+  if (p.condicion) $("#inCond").value = p.condicion;
+  if (p.dias != null && p.dias !== "") $("#inDias").value = p.dias;
+  window.__resetVenc?.();
+  if (p.dias != null && p.dias !== "") $("#inVenc").value = sumarDias($("#inFecha").value, p.dias);
+  if (p.diasValores != null && p.diasValores !== "") $("#inValores").value = sumarDias($("#inFecha").value, p.diasValores);
+  n.textContent = `Condición de ${p.nombre}: ${[p.condicion, p.dias != null && p.dias !== "" ? p.dias + " días" : "", p.diasValores ? `valores a ${p.diasValores} días` : "", p.medio].filter(Boolean).join(" · ")}`;
+  n.hidden = false; return p;
+}
 function aplicarCondicion(fa) {
   const cond = String(fa.condicion_pago || "").trim();
   const dias = Number.isFinite(fa.dias_pago) ? fa.dias_pago : diasDeCond(cond);
@@ -567,7 +623,7 @@ function renderStaged() {
 }
 function errL(t) { $("#formLErr").textContent = t || ""; $("#formLErr").hidden = !t; }
 function resetFormL() {
-  $("#formL").reset(); $("input[name=tipo][value=local]").checked = true; $("#inFecha").value = hoy(); $("#inMon").value = "ARS"; window.__resetVenc?.();
+  $("#formL").reset(); $("input[name=tipo][value=local]").checked = true; $("#inFecha").value = hoy(); $("#inMon").value = "ARS"; window.__resetVenc?.(); $("#provNote").hidden = true;
   staged.forEach((s) => s.url && URL.revokeObjectURL(s.url)); staged = []; renderStaged(); syncTipo(); errL(""); scanMsg(""); $("#progL").textContent = "";
   edForm?.set();
 }
@@ -622,7 +678,7 @@ async function guardarIngreso(e) {
       courier: t === "courier" ? $("#inCourier").value.trim() : "", guia: t === "courier" ? $("#inGuia").value.trim() : "",
       despacho: t !== "local" ? $("#inDesp").value.trim() : "", contenedor: t === "contenedor" ? $("#inCont").value.trim() : "",
       despachante: t === "contenedor" ? $("#inDespachante").value.trim() : "", notas: $("#inNotas").value.trim(), notasOficina: "",
-      condicionPago: $("#inCond").value, diasPago: $("#inDias").value.trim() === "" ? null : parseNum($("#inDias").value), vencimiento: $("#inVenc").value || "", entregaValores: $("#inValores").value || "",
+      cuit: $("#inCuit").value || "", condicionPago: $("#inCond").value, diasPago: $("#inDias").value.trim() === "" ? null : parseNum($("#inDias").value), vencimiento: $("#inVenc").value || "", entregaValores: $("#inValores").value || "",
       estado: "pendiente", archivos, creadoPor: f.por, creadoPorNombre: f.porNombre, creadoEn: nowISO(), recibidoPor: null, recibidoPorNombre: null, recibidoEn: null,
     });
     if (items.length) batchCompra(bt, id, { fecha, proveedor: prov, factura: fact, moneda, items, impuestos: edForm.validImp(), ...edForm.ajustes() });
@@ -696,21 +752,27 @@ function openIngreso(id) {
     let pagoHtml = "";
     if (S.admin && m) {
       const pag = pagadoDe(m), sal = saldoDe(m);
+      const est = estadoPago(m);
       pagoHtml = `<div class="sep"></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>Pagos <span class="chip lock">Admin</span></b>${estaPagado(m) ? '<span class="chip ok">Pagado</span>' : st.pagoForm ? "" : '<button class="btn small primary" data-act="pagoform">+ Registrar pago</button>'}</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>Pagos <span class="chip lock">Admin</span></b>${est === "pagado" ? '<span class="chip ok">Pagado</span>' : est === "enviado" ? '<span class="chip info">Cheques enviados · falta que se cobren</span>' : st.pagoForm ? "" : '<button class="btn small primary" data-act="pagoform">+ Registrar pago / cheques</button>'}</div>
       <div class="totbox" style="justify-content:flex-start"><div><span>Total factura</span><b>${fmtMon(totF(m), m.moneda)}</b></div><div><span>Pagado</span><b>${fmtMon(pag, m.moneda)}</b></div><div class="big"><span>Saldo</span><b>${fmtMon(Math.max(0, sal), m.moneda)}</b></div></div>
-      ${(m.pagos || []).length ? `<div class="files">${m.pagos.map((p, i) => `<div class="frow"><span class="txt"><b>${fmtFecha(p.fecha)} · ${fmtMon(p.importe, m.moneda)}</b><small>${esc(p.medio || "")}${p.nota ? " · " + esc(p.nota) : ""} · cargó ${esc(p.porNombre || "")}</small></span>${st.confirmPago === i ? `<button class="btn small danger" data-act="rmpago-ok" data-i="${i}">Borrar</button><button class="btn small" data-act="rmpago-no">No</button>` : `<button class="btn small" data-act="rmpago" data-i="${i}" aria-label="Borrar pago">✕</button>`}</div>`).join("")}</div>` : ""}
+      ${(m.pagos || []).length ? `<div class="files">${m.pagos.map((p, i) => `<div class="frow"><span class="txt"><b>${fmtMon(p.importe, m.moneda)} · ${esc(p.medio || "")}${p.numero ? " N° " + esc(p.numero) : ""}</b><small>${p.estado === "enviado" ? `Enviado ${fmtFecha(p.fecha)}${p.fechaCobro ? " · se cobra el " + fmtFecha(p.fechaCobro) : ""}` : `Pagado ${fmtFecha(p.fechaAcreditado || p.fecha)}`}${p.banco ? " · " + esc(p.banco) : ""}${p.nota ? " · " + esc(p.nota) : ""} · cargó ${esc(p.porNombre || "")}</small></span>${p.estado === "enviado" ? `<span class="chip info">Enviado</span><button class="btn small" data-act="cobrado" data-i="${i}">Marcar cobrado</button>` : '<span class="chip ok">Pagado</span>'}${st.confirmPago === i ? `<button class="btn small danger" data-act="rmpago-ok" data-i="${i}">Borrar</button><button class="btn small" data-act="rmpago-no">No</button>` : `<button class="btn small" data-act="rmpago" data-i="${i}" aria-label="Borrar pago">✕</button>`}</div>`).join("")}</div>` : ""}
       ${st.pagoForm ? `<div class="panel tight"><div class="grid2">
         <label class="f">Fecha<input type="date" id="pFecha" value="${hoy()}"></label>
         <label class="f">Importe (${esc(m.moneda)})<input type="text" inputmode="decimal" id="pImp" value="${fmtNum(Math.max(0, sal), 2)}"></label>
         <label class="f">Medio<select id="pMedio">${MEDIOS.map((x) => `<option>${x}</option>`).join("")}</select></label>
-        <label class="f">Nota<input type="text" id="pNota" placeholder="N° de cheque, banco, comprobante…"></label></div>
+        <label class="f">Estado<select id="pEstado"><option value="pagado">Pagado / acreditado</option><option value="enviado">Enviado / entregado (cheque a cobrar)</option></select></label>
+        <label class="f" data-cheq>Fecha de cobro del cheque<input type="date" id="pCobro"></label>
+        <label class="f" data-cheq>N° de cheque<input type="text" id="pNum" class="mono"></label>
+        <label class="f" data-cheq>Banco<input type="text" id="pBanco"></label>
+        <label class="f">Nota<input type="text" id="pNota" placeholder="Comprobante, a quién se entregó…"></label></div>
+        <div class="hint">Si pagás con varios cheques, cargá uno por vez.</div>
         <div class="bar"><button class="btn primary small" data-act="pagosave">Guardar pago</button><button class="btn small" data-act="pagocancel">Cancelar</button></div></div>` : ""}`;
     }
     const filaPie = (k, v, cls = "") => `<tr${cls ? ` class="${cls}"` : ""}><td colspan="${NC - 1}" class="num" style="font-weight:500">${k}</td><td class="num">${v}</td></tr>`;
     const pie = m ? [
       m.bonif ? filaPie("Subtotal", fmtNum(brutoDe(m), 2)) : "",
-      m.bonif ? filaPie(`Bonificación ${pctTxt(m.bonif.pct)}`, "− " + fmtNum(m.bonif.importe, 2)) : "",
+      ...(m.bonif ? (m.bonif.detalle?.length ? m.bonif.detalle : [m.bonif]).map((b, k, arr) => filaPie(`Bonificación${arr.length > 1 ? " " + (k + 1) : ""} ${pctTxt(b.pct)}`, "− " + fmtNum(b.importe, 2))) : []),
       filaPie("Subtotal neto", fmtNum(netoDe(m), 2)),
       ...(m.impuestos || []).map((t) => filaPie(esc(t.concepto + (t.alicuota != null && !/%/.test(t.concepto) ? ` ${String(t.alicuota).replace(".", ",")}%` : "")), fmtNum(t.importe, 2))),
       filaPie("Total factura", fmtMon(totF(m), m.moneda), "grand"),
@@ -745,6 +807,8 @@ function openIngreso(id) {
         <button class="btn" data-act="notas">Guardar notas</button>
         ${S.admin ? (st.confirmDel ? `<span class="confirm">¿Eliminar ingreso, productos y archivos? <button class="btn small danger" data-act="del-ok">Eliminar</button><button class="btn small" data-act="del-no">Cancelar</button></span>` : `<button class="btn small danger" data-act="del" style="margin-left:auto">Eliminar</button>`) : ""}
       </div>`;
+    const pm = $("#pMedio");
+    if (pm) { const sync = () => { const ch = esCheque(pm.value); $$("#sheet [data-cheq]").forEach((x) => { x.hidden = !ch; }); $("#pEstado").value = ch ? "enviado" : "pagado"; }; pm.onchange = sync; sync(); }
     (l.archivos || []).forEach((a) => {
       if ((a.mime || "").startsWith("image/") && !urls[a.path]) {
         urls[a.path] = "pending";
@@ -784,7 +848,8 @@ function openIngreso(id) {
     st.ed.set(c ? {
       items: c.items.map((it, i) => { const p = m?.items?.[i] || {}; return { sku: it.sku, desc: it.desc, cant: fmtCant(it.cant), lista: p.lista ? pre(p.lista) : "", dto: p.dto || "", pu: p.pu ? pre(p.pu) : "", iva: String(p.iva ?? 21).replace(".", ",") }; }),
       imp: (m?.impuestos || []).map((t) => ({ concepto: t.concepto, alicuota: t.alicuota != null ? String(t.alicuota).replace(".", ",") : "", importe: pre(t.importe) })),
-      bonif: m?.bonif ? { pct: pre(m.bonif.pct), importe: pre(m.bonif.importe), modo: "imp" } : null,
+      bonifs: m?.bonif ? (m.bonif.detalle?.length ? m.bonif.detalle : [m.bonif]).map((b) => ({ pct: pre(b.pct), importe: pre(b.importe), modo: "imp" })) : [],
+      bonifModo: m?.bonif?.modo || "cascada",
       extra: m?.extra ? { concepto: m.extra.concepto || "", pct: pre(m.extra.pct), importe: pre(m.extra.importe), modo: "pct" } : null,
     } : {});
     const sm = (t, tipo = "") => { const n = $("#scanMsgDet"); n.textContent = t; n.className = "note" + (tipo ? " " + tipo : ""); n.hidden = !t; };
@@ -829,14 +894,17 @@ function openIngreso(id) {
         let pagos = [...(mm.pagos || [])];
         if (act === "pagosave") {
           const imp = parseNum($("#pImp").value); if (!imp) { st.msg = "!Poné el importe del pago."; return draw(true); }
-          const f = firmar(); pagos.push({ fecha: $("#pFecha").value || hoy(), importe: +imp.toFixed(2), medio: $("#pMedio").value, nota: $("#pNota").value.trim(), por: f.por, porNombre: f.porNombre, en: nowISO() });
+          const f = firmar(); const cheq = esCheque($("#pMedio").value);
+          pagos.push({ fecha: $("#pFecha").value || hoy(), importe: +imp.toFixed(2), medio: $("#pMedio").value, estado: $("#pEstado").value, nota: $("#pNota").value.trim(),
+            ...(cheq ? { numero: $("#pNum").value.trim(), banco: $("#pBanco").value.trim(), fechaCobro: $("#pCobro").value || "" } : {}),
+            ...($("#pEstado").value === "pagado" ? { fechaAcreditado: $("#pFecha").value || hoy() } : {}), por: f.por, porNombre: f.porNombre, en: nowISO() });
         } else pagos = pagos.filter((_, j) => j !== +b.dataset.i);
         b.disabled = true;
-        const pagado = pagos.reduce((a, x) => a + x.importe, 0);
-        await updateDoc(doc(db, "comprasMontos", c.id), { pagos, pagado: +pagado.toFixed(2), estadoPago: totF(mm) - pagado <= 0.5 ? "pagado" : pagado ? "parcial" : "pendiente" });
+        await guardarPagos(c.id, pagos);
         st.pagoForm = false; st.confirmPago = null; st.lock = st.editCond; st.msg = act === "pagosave" ? "Pago registrado." : "Pago borrado."; return draw(true);
       }
       if (act === "rmpago") { st.confirmPago = +b.dataset.i; return draw(true); }
+      if (act === "cobrado") { const mm = S.montos[c.id]; const pagos = mm.pagos.map((p, j) => j === +b.dataset.i ? { ...p, estado: "pagado", fechaAcreditado: hoy() } : p); b.disabled = true; await guardarPagos(c.id, pagos); st.msg = "Cheque marcado como cobrado."; return draw(true); }
       if (act === "rmpago-no") { st.confirmPago = null; return draw(true); }
       if (act === "canceledit") { st.edit = false; return draw(); }
       if (act === "saveprod") {
@@ -950,16 +1018,21 @@ function initPagos() {
     <div class="bar"><span class="h2">Agenda de pagos</span><span class="chip lock">Solo administración</span><span style="flex:1"></span>
       <button class="btn" id="bCopPag" type="button">Copiar próximos pagos</button><button class="btn" id="bCsvPag" type="button">Exportar CSV</button></div>
     <div id="pagStats"></div>
-    <div class="bar"><div class="seg" role="group" aria-label="Filtro"><button type="button" data-p="pend" aria-pressed="true">A pagar</button><button type="button" data-p="pag" aria-pressed="false">Pagados</button><button type="button" data-p="all" aria-pressed="false">Todos</button></div>
+    <div class="bar"><div class="seg" role="group" aria-label="Filtro"><button type="button" data-p="pend" aria-pressed="true">A pagar</button><button type="button" data-p="env" aria-pressed="false">Cheques enviados</button><button type="button" data-p="pag" aria-pressed="false">Pagados</button><button type="button" data-p="all" aria-pressed="false">Todos</button></div>
       <input class="grow" type="search" id="qP" placeholder="Buscar proveedor o factura" aria-label="Buscar pagos"></div>
     <div class="note" id="pagMsg" hidden></div>
     <div id="pagList"></div></div>`;
   $$("#v-pagos .seg button").forEach((b) => b.onclick = () => { pagFiltro = b.dataset.p; $$("#v-pagos .seg button").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); renderPagos(); });
   $("#qP").oninput = renderPagos;
-  $("#pagList").addEventListener("click", (e) => { const b = e.target.closest("[data-open]"); if (b) openIngreso(b.dataset.open); });
+  $("#pagList").addEventListener("click", async (e) => {
+    const cb = e.target.closest("[data-cobrado]");
+    if (cb) { e.stopPropagation(); const [cid, i] = cb.dataset.cobrado.split("|"); const mm = S.montos[cid]; cb.disabled = true; try { await guardarPagos(cid, mm.pagos.map((p, j) => j === +i ? { ...p, estado: "pagado", fechaAcreditado: hoy() } : p)); } catch (_) { cb.disabled = false; } return; }
+    const b = e.target.closest("[data-open]"); if (b) openIngreso(b.dataset.open);
+  });
   $("#bCopPag").onclick = async () => {
     const rows = filasPago().filter((x) => !x.pagado && x.l.vencimiento && diasHasta(x.l.vencimiento) <= 30).sort((a, b) => (a.l.vencimiento > b.l.vencimiento ? 1 : -1));
-    const txt = rows.length ? "Próximos pagos NIVIKO\n" + rows.map((x) => { const d = diasHasta(x.l.vencimiento); return `• ${fmtFecha(x.l.vencimiento)}${d < 0 ? " (VENCIDO)" : ""} — ${x.l.proveedor || ""}${x.l.factura ? " · Fact. " + x.l.factura : ""} — ${fmtMon(x.saldo, x.m.moneda)}${x.l.condicionPago ? " · " + x.l.condicionPago : ""}${x.l.entregaValores ? " · valores antes del " + fmtFecha(x.l.entregaValores) : ""}`; }).join("\n") : "No hay pagos pendientes en los próximos 30 días.";
+    const chq = filasPago().flatMap((x) => (x.m.pagos || []).filter((p) => p.estado === "enviado").map((p) => `• ${p.fechaCobro ? fmtFecha(p.fechaCobro) : "s/fecha"} — ${x.l.proveedor || ""} — ${fmtMon(p.importe, x.m.moneda)} · ${p.medio}${p.numero ? " N° " + p.numero : ""}`));
+    const txt = (rows.length ? "Próximos pagos NIVIKO\n" + rows.map((x) => { const d = diasHasta(x.l.vencimiento); return `• ${fmtFecha(x.l.vencimiento)}${d < 0 ? " (VENCIDO)" : ""} — ${x.l.proveedor || ""}${x.l.factura ? " · Fact. " + x.l.factura : ""} — ${fmtMon(x.saldo, x.m.moneda)}${x.l.condicionPago ? " · " + x.l.condicionPago : ""}${x.l.entregaValores ? " · valores antes del " + fmtFecha(x.l.entregaValores) : ""}`; }).join("\n") : "No hay pagos pendientes en los próximos 30 días.") + (chq.length ? "\n\nCheques enviados a cobrar\n" + chq.join("\n") : "");
     const n = $("#pagMsg");
     try { await navigator.clipboard.writeText(txt); n.textContent = "Copiado. Pegalo en WhatsApp o en un mail."; }
     catch { n.textContent = txt; }
@@ -969,7 +1042,7 @@ function initPagos() {
     ...filasPago().sort((a, b) => ((a.l.vencimiento || "9") > (b.l.vencimiento || "9") ? 1 : -1)).map((x) => [x.l.vencimiento, x.l.entregaValores, x.l.proveedor, x.l.factura, x.l.condicionPago, x.m.moneda, totF(x.m), pagadoDe(x.m), x.saldo, x.pagado ? "Pagado" : "Pendiente"])]);
 }
 function filasPago() {
-  return S.legajos.map((l) => { const c = compraDe(l); const m = c && S.montos[c.id]; return m ? { l, m, saldo: Math.max(0, saldoDe(m)), pagado: estaPagado(m) } : null; }).filter(Boolean);
+  return S.legajos.map((l) => { const c = compraDe(l); const m = c && S.montos[c.id]; return m ? { l, m, c, saldo: Math.max(0, saldoDe(m)), pagado: estaPagado(m), est: estadoPago(m) } : null; }).filter(Boolean);
 }
 function renderPagos() {
   if (!S.admin || !$("#pagList")) return;
@@ -979,18 +1052,21 @@ function renderPagos() {
   if (!S.loaded.legajos || !S.loaded.montos) { $("#pagList").innerHTML = `<div class="empty"><b>Cargando…</b></div>`; return; }
   const sum = (arr) => arr.reduce((a, x) => { a[x.m.moneda] = (a[x.m.moneda] || 0) + x.saldo; return a; }, {});
   const fmtS = (o) => Object.entries(o).map(([mon, v]) => fmtMon(v, mon)).join(" + ") || "—";
+  const cheques = filasPago().flatMap((x) => (x.m.pagos || []).map((p, i) => ({ p, i, l: x.l, mon: x.m.moneda, cid: x.c.id })).filter((y) => y.p.estado === "enviado")).sort((a, b) => ((a.p.fechaCobro || "9") > (b.p.fechaCobro || "9") ? 1 : -1));
   const venc = pend.filter((x) => x.l.vencimiento && diasHasta(x.l.vencimiento) < 0), sem = pend.filter((x) => x.l.vencimiento && diasHasta(x.l.vencimiento) >= 0 && diasHasta(x.l.vencimiento) <= 7), mes = pend.filter((x) => x.l.vencimiento && diasHasta(x.l.vencimiento) > 7 && diasHasta(x.l.vencimiento) <= 30);
   $("#pagStats").innerHTML = `<div class="stats">
     <div class="stat${venc.length ? " alert" : ""}"><b>${fmtS(sum(venc))}</b><span>Vencido · ${venc.length}</span></div>
     <div class="stat"><b>${fmtS(sum(sem))}</b><span>Próximos 7 días · ${sem.length}</span></div>
     <div class="stat"><b>${fmtS(sum(mes))}</b><span>8 a 30 días · ${mes.length}</span></div>
-    <div class="stat"><b>${fmtS(sum(pend))}</b><span>Total a pagar · ${pend.length}</span></div></div>`;
+    <div class="stat"><b>${fmtS(sum(pend))}</b><span>Total a pagar · ${pend.length}</span></div>
+    <div class="stat"><b>${fmtS(cheques.reduce((a, x) => { a[x.mon] = (a[x.mon] || 0) + x.p.importe; return a; }, {}))}</b><span>Cheques sin cobrar · ${cheques.length}</span></div></div>
+    ${cheques.length ? `<div class="panel tight"><b>Cheques enviados a cobrar</b><div class="files">${cheques.map((x) => { const d = diasHasta(x.p.fechaCobro); return `<div class="frow"><span class="txt"><b>${x.p.fechaCobro ? fmtFecha(x.p.fechaCobro) : "Sin fecha"} · ${fmtMon(x.p.importe, x.mon)}</b><small>${esc(x.l.proveedor || "")} · ${esc(x.p.medio)}${x.p.numero ? " N° " + esc(x.p.numero) : ""}${x.p.banco ? " · " + esc(x.p.banco) : ""}</small></span>${d != null && d <= 0 ? '<span class="chip warn">Ya se cobra</span>' : d != null ? `<span class="chip info">en ${d} d</span>` : ""}<button class="btn small" data-cobrado="${esc(x.cid)}|${x.i}">Marcar cobrado</button></div>`; }).join("")}</div></div>` : ""}`;
   const q = $("#qP").value.trim().toLowerCase();
-  let rows = filasPago().filter((x) => (pagFiltro === "all" || (pagFiltro === "pend" ? !x.pagado : x.pagado)) && (!q || [x.l.proveedor, x.l.factura].join(" ").toLowerCase().includes(q)));
+  let rows = filasPago().filter((x) => (pagFiltro === "all" || (pagFiltro === "pend" ? !x.pagado : pagFiltro === "env" ? x.est === "enviado" : x.est === "pagado")) && (!q || [x.l.proveedor, x.l.factura].join(" ").toLowerCase().includes(q)));
   if (!rows.length) { $("#pagList").innerHTML = `<div class="empty"><b>${pagFiltro === "pend" && !q ? "No hay pagos pendientes ✓" : "Nada con ese filtro"}</b><span>Los pagos salen de los ingresos con productos y precios cargados. La condición de pago se carga en cada ingreso.</span></div>`; return; }
   rows.sort((a, b) => ((a.l.vencimiento || "9999") > (b.l.vencimiento || "9999") ? 1 : -1));
   if (pagFiltro === "pag") rows.reverse();
-  const grupo = (x) => { if (x.pagado) return "Pagados"; if (!x.l.vencimiento) return "Sin vencimiento cargado"; const d = diasHasta(x.l.vencimiento); return d < 0 ? "Vencidos" : d <= 7 ? "Esta semana" : d <= 30 ? "Próximos 30 días" : "Más adelante"; };
+  const grupo = (x) => { if (x.est === "enviado") return "Cheques enviados (a cobrar)"; if (x.pagado) return "Pagados"; if (!x.l.vencimiento) return "Sin vencimiento cargado"; const d = diasHasta(x.l.vencimiento); return d < 0 ? "Vencidos" : d <= 7 ? "Esta semana" : d <= 30 ? "Próximos 30 días" : "Más adelante"; };
   let html = "", g0 = null;
   for (const x of rows) {
     const g = grupo(x); if (g !== g0) { html += `<div class="grouph">${g}</div>`; g0 = g; }
@@ -1000,6 +1076,76 @@ function renderPagos() {
       <div class="meta">${x.l.factura ? `<span>Fact. <span class="mono">${esc(x.l.factura)}</span></span>` : ""}<span>${esc(x.l.condicionPago || "Sin condición")}</span>${x.l.vencimiento ? `<span>Vence ${fmtFecha(x.l.vencimiento)}</span>` : ""}${x.l.entregaValores ? `<span>Valores antes del ${fmtFecha(x.l.entregaValores)}</span>` : ""}${pag && !x.pagado ? `<span class="chip info">Pago parcial ${fmtMon(pag, x.m.moneda)}</span>` : ""}${chipVence(x.l, x.m)}</div></button>`;
   }
   $("#pagList").innerHTML = `<div class="list">${html}</div>`;
+}
+
+/* ================= PROVEEDORES (admin) ================= */
+function initProveedores() {
+  $("#v-proveedores").innerHTML = `<div style="display:grid;gap:14px">
+    <div class="bar"><span class="h2">Proveedores y condiciones de pago</span><span class="chip lock">Solo administración</span><span style="flex:1"></span><button class="btn primary" id="bNuevoProv" type="button">+ Proveedor</button></div>
+    <div class="hint">La condición que cargues acá se aplica sola en cada ingreso nuevo de ese proveedor (gana sobre lo que lea el escáner).</div>
+    <input type="search" id="qProv" placeholder="Buscar proveedor" aria-label="Buscar proveedor">
+    <div id="provList"></div></div>`;
+  $("#bNuevoProv").onclick = () => openProveedor(null);
+  $("#qProv").oninput = renderProveedores;
+  $("#provList").addEventListener("click", (e) => { const b = e.target.closest("[data-prov]"); if (b) openProveedor(b.dataset.prov || null, b.dataset.nombre, b.dataset.cuit); });
+}
+function renderProveedores() {
+  const dl = $("#dlProv"); if (dl) dl.innerHTML = [...new Set([...S.proveedores.map((p) => p.nombre), ...S.legajos.map((l) => l.proveedor).filter(Boolean)])].slice(0, 500).map((n) => `<option value="${esc(n)}">`).join("");
+  const el = $("#provList"); if (!el) return;
+  if (!S.loaded.proveedores) { el.innerHTML = `<div class="empty"><b>Cargando…</b></div>`; return; }
+  const q = $("#qProv").value.trim().toLowerCase();
+  // proveedores que aparecen en ingresos pero todavía no tienen condición configurada
+  const sinConf = []; const vistos = new Set();
+  S.legajos.forEach((l) => { if (!l.proveedor) return; const n = normProv(l.proveedor); if (vistos.has(n) || provDe(l.proveedor, l.cuit)) return; vistos.add(n); sinConf.push(l); });
+  const rows = S.proveedores.filter((p) => !q || [p.nombre, p.cuit].join(" ").toLowerCase().includes(q)).sort((a, b) => a.nombre.localeCompare(b.nombre));
+  const sc = sinConf.filter((l) => !q || l.proveedor.toLowerCase().includes(q));
+  el.innerHTML = `<div class="list">${rows.map((p) => { const n = S.legajos.filter((l) => provDe(l.proveedor, l.cuit)?.id === p.id).length; return `<button type="button" class="card neutral" data-prov="${esc(p.id)}">
+      <div class="row1"><span class="ttl">${esc(p.nombre)}</span><span class="chip ${p.condicion ? "ok" : "warn"}">${esc([p.condicion, p.dias != null && p.dias !== "" && !/d[ií]as/.test(p.condicion || "") ? p.dias + " días" : ""].filter(Boolean).join(" · ") || "Sin condición")}</span></div>
+      <div class="meta">${p.cuit ? `<span class="mono">CUIT ${esc(p.cuit)}</span>` : ""}${p.diasValores ? `<span>Valores a ${p.diasValores} días</span>` : ""}${p.medio ? `<span>${esc(p.medio)}</span>` : ""}${p.contacto ? `<span>${esc(p.contacto)}</span>` : ""}<span>${n} ingreso${n === 1 ? "" : "s"}</span></div></button>`; }).join("")}
+    ${sc.length ? `<div class="grouph">Sin condición configurada</div>${sc.map((l) => `<button type="button" class="card" data-prov="" data-nombre="${esc(l.proveedor)}" data-cuit="${esc(l.cuit || "")}"><div class="row1"><span class="ttl">${esc(l.proveedor)}</span><span class="chip warn">Configurar</span></div></button>`).join("")}` : ""}
+    ${!rows.length && !sc.length ? `<div class="empty"><b>Sin proveedores todavía</b><span>Tocá <b>+ Proveedor</b> y cargá su condición de pago.</span></div>` : ""}</div>`;
+}
+function openProveedor(id, nombre = "", cuit = "") {
+  const p = id ? S.proveedores.find((x) => x.id === id) : { nombre, cuit };
+  const st = { msg: "", confirmDel: false };
+  const draw = (force) => {
+    if (force !== true && $("#sheet .provform")) return; // no pisar lo que se está tipeando
+    $("#sheet").innerHTML = `<div class="hd"><h2>${id ? esc(p.nombre) : "Nuevo proveedor"}</h2><button class="btn small" data-act="close">Cerrar</button></div>
+      <div class="grid2 provform">
+        <label class="f">Nombre / razón social<input type="text" id="prNom" value="${esc(p.nombre || "")}"></label>
+        <label class="f">CUIT<input type="text" id="prCuit" class="mono" value="${esc(p.cuit || "")}" placeholder="30-70813731-2"></label>
+        <label class="f">Condición de pago<select id="prCond"><option value="">— Sin definir —</option>${condOptions(p.condicion || "")}</select></label>
+        <label class="f">Días de plazo<input type="text" inputmode="numeric" id="prDias" value="${esc(p.dias ?? "")}" placeholder="Ej: 60"></label>
+        <label class="f">Entregar valores a los … días <span class="hint">(opcional)</span><input type="text" inputmode="numeric" id="prVal" value="${esc(p.diasValores ?? "")}" placeholder="Ej: 30"></label>
+        <label class="f">Medio de pago habitual<select id="prMedio"><option value="">—</option>${MEDIOS.map((x) => `<option${x === p.medio ? " selected" : ""}>${x}</option>`).join("")}</select></label>
+        <label class="f">Contacto de pagos<input type="text" id="prCont" value="${esc(p.contacto || "")}" placeholder="Nombre, teléfono o mail"></label>
+      </div>
+      <label class="f">Notas<textarea id="prNotas" rows="2" placeholder="CBU, a quién se le entregan los cheques, descuentos acordados…">${esc(p.notas || "")}</textarea></label>
+      ${st.msg ? `<div class="note${st.msg.startsWith("!") ? " err" : ""}">${esc(st.msg.replace(/^!/, ""))}</div>` : ""}
+      <div class="bar"><button class="btn primary" data-act="save">Guardar</button><button class="btn" data-act="close">Cancelar</button>
+        ${id ? (st.confirmDel ? `<span class="confirm">¿Borrar proveedor? <button class="btn small danger" data-act="del-ok">Borrar</button><button class="btn small" data-act="del-no">No</button></span>` : `<button class="btn small danger" data-act="del" style="margin-left:auto">Borrar</button>`) : ""}</div>`;
+    $("#prCond").onchange = () => { const d = diasDeCond($("#prCond").value); if (d != null) $("#prDias").value = d; };
+  };
+  $("#sheet").onclick = async (e) => {
+    const b = e.target.closest("[data-act]"); if (!b) return; const act = b.dataset.act;
+    if (act === "close") return closeSheet();
+    try {
+      if (act === "save") {
+        const nom = $("#prNom").value.trim(); if (!nom) { st.msg = "!Poné el nombre del proveedor."; return draw(true); }
+        const num = (v) => (String(v).trim() === "" ? null : parseNum(v));
+        const data = { nombre: nom, cuit: $("#prCuit").value.trim(), condicion: $("#prCond").value, dias: num($("#prDias").value), diasValores: num($("#prVal").value), medio: $("#prMedio").value, contacto: $("#prCont").value.trim(), notas: $("#prNotas").value.trim(),
+          alias: [...new Set([normProv(nom), ...(p.alias || []), nombre ? normProv(nombre) : ""].filter(Boolean))], editadoEn: nowISO() };
+        b.disabled = true; await setDoc(doc(db, "proveedores", id || doc(collection(db, "proveedores")).id), data, { merge: true });
+        return closeSheet();
+      }
+      if (act === "del") st.confirmDel = true;
+      if (act === "del-no") st.confirmDel = false;
+      if (act === "del-ok") { await deleteDoc(doc(db, "proveedores", id)); return closeSheet(); }
+    } catch (err) { console.error(err); st.msg = "!No se pudo guardar. ¿Publicaste las reglas nuevas de Firestore?"; }
+    draw(true);
+  };
+  openSheet(draw);
+  draw(true);
 }
 
 /* ================= RESUMEN (admin) ================= */

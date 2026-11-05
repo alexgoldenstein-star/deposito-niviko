@@ -184,3 +184,5 @@ table.items .c-dto{width:8%}
 .grouph{font-family:var(--f-display);font-size:1.05rem;font-weight:700;margin-top:6px;color:var(--muted);text-transform:uppercase;letter-spacing:.05em}
 .stat.alert{border-color:var(--warn);background:var(--warn-bg)}
 .stat.alert b{color:var(--warn)}
+.improw.bon{grid-template-columns:70px 90px 150px auto}
+@media (max-width:560px){.improw.bon{grid-template-columns:56px 1fr 1fr auto}}

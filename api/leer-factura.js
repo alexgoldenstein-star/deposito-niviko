@@ -36,6 +36,11 @@ const SCHEMA = {
     },
     subtotal_neto: { type: "number", description: "Subtotal sin impuestos DESPUÉS de bonificaciones generales (base de IVA), si figura" },
     subtotal_bruto: { type: "number", description: "Subtotal de los renglones ANTES de bonificaciones generales, si figura" },
+    bonificaciones_detalle: {
+      type: "array",
+      description: "Si la factura tiene varias bonificaciones (1ra, 2da, 3ra…), cada una en orden con su % y su importe",
+      items: { type: "object", properties: { pct: { type: "number" }, importe: { type: "number" } } },
+    },
     bonificacion_pct: { type: "number", description: "Bonificación o descuento general de la factura en %, si figura" },
     bonificaciones: { type: "number", description: "Importe de bonificaciones o descuentos generales de la factura (positivo), que se restan del subtotal antes de impuestos" },
     impuestos: {
