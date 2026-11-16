@@ -52,26 +52,25 @@ const MEDIOS = ["Transferencia", "E-cheq", "Cheque", "Cheque diferido", "Efectiv
 const diasDeCond = (c) => { const x = String(c || "").match(/(\d+)\s*d/i); return x ? +x[1] : /contado|anticipado/i.test(c || "") ? 0 : null; };
 const sumarDias = (f, d) => { if (!f || d == null || d === "") return ""; const x = new Date(f + "T12:00:00"); x.setDate(x.getDate() + +d); return `${x.getFullYear()}-${String(x.getMonth() + 1).padStart(2, "0")}-${String(x.getDate()).padStart(2, "0")}`; };
 const diasHasta = (f) => (f ? Math.round((new Date(f + "T12:00:00") - new Date(hoy() + "T12:00:00")) / 864e5) : null);
-const pagadoDe = (m) => (m?.pagos || []).reduce((a, p) => a + (p.importe || 0), 0);
-const enCirculacion = (m) => (m?.pagos || []).filter((p) => p.estado === "enviado");
-const saldoDe = (m) => +(totF(m) - pagadoDe(m)).toFixed(2);
-const estaPagado = (m) => m && totF(m) > 0 && saldoDe(m) <= 0.5; // cubierto (pagado o con cheques enviados)
-// "pendiente" | "parcial" | "enviado" (cubierto con cheques sin cobrar) | "pagado"
-const estadoPago = (m) => !m || !pagadoDe(m) ? "pendiente" : !estaPagado(m) ? "parcial" : enCirculacion(m).length ? "enviado" : "pagado";
-const esCheque = (medio) => /cheq/i.test(medio || "");
+const pagadoDe = (m) => (m?.pagos || []).reduce((a, p) => a + (p.importe || 0), 0); // registros viejos
+// Pagado / no pagado (el detalle de cómo se pagó vive en el sistema de gestión)
+const estaPagado = (m) => !!m && (m.pagadoOk === true || (m.pagadoOk !== false && pagadoDe(m) > 0 && totF(m) - pagadoDe(m) <= 0.5));
+const saldoDe = (m) => (estaPagado(m) ? 0 : totF(m));
+const estadoPago = (m) => (estaPagado(m) ? "pagado" : "pendiente");
+const conservarPago = (x) => (x ? Object.fromEntries(["pagos", "pagado", "pagadoOk", "pagadoEn", "pagadoPorNombre"].filter((k) => x[k] !== undefined).map((k) => [k, x[k]])) : {});
 function chipVence(l, m) {
-  if (S.admin && m) { const e = estadoPago(m); if (e === "pagado") return `<span class="chip ok">Pagado</span>`; if (e === "enviado") return `<span class="chip info">Cheques enviados</span>`; }
+  if (S.admin && m && estaPagado(m)) return `<span class="chip ok">Pagado</span>`;
   if (!l.vencimiento) return l.condicionPago ? `<span class="chip">${esc(l.condicionPago)}</span>` : "";
   if (!S.admin) return `<span class="chip">Vence ${fmtFecha(l.vencimiento).slice(0, 5)}</span>`; // el estado de pago solo lo ve administración
   const d = diasHasta(l.vencimiento);
   const txt = d < 0 ? `Vencido hace ${-d} d` : d === 0 ? "Vence hoy" : `Vence ${fmtFecha(l.vencimiento).slice(0, 5)} · ${d} d`;
-  return `<span class="chip ${d < 0 ? "warn strong" : d <= 7 ? "warn" : "info"}">${txt}${m && estadoPago(m) === "parcial" ? " · parcial" : ""}</span>`;
+  return `<span class="chip ${d < 0 ? "warn strong" : d <= 7 ? "warn" : "info"}">${txt}</span>`;
 }
 // k = "merc" (factura de la mercadería, comprasMontos) | "gast" (servicio logístico e impuestos, gastosImport)
 const PAY = { merc: { col: "comprasMontos", src: () => S.montos }, gast: { col: "gastosImport", src: () => S.gastos } };
-async function guardarPagos(id, pagos, k = "merc") {
-  const mm = PAY[k].src()[id]; const pagado = +pagos.reduce((a, x) => a + (x.importe || 0), 0).toFixed(2);
-  await updateDoc(doc(db, PAY[k].col, id), { pagos, pagado, estadoPago: estadoPago({ ...mm, pagos }) });
+async function marcarPagado(k, id, on) {
+  const f = firmar();
+  await updateDoc(doc(db, PAY[k].col, id), on ? { pagadoOk: true, pagadoEn: hoy(), pagadoPorNombre: f.porNombre, estadoPago: "pagado" } : { pagadoOk: false, pagadoEn: null, pagadoPorNombre: null, estadoPago: "pendiente" });
 }
 // Gastos de importación: "costo" se suma a la mercadería; "credito" (IVA, percepciones) se recupera
 const CONCEPTOS_IMP = ["Flete internacional", "Servicio courier", "Seguro", "Derechos de importación", "Tasa estadística", "Arancel SIM", "Gastos de gestión / despacho", "Almacenaje", "Honorarios despachante", "IVA 21%", "IVA adicional 20%", "Percepción Ganancias", "Percepción IIBB", "Otros"];
@@ -102,6 +101,7 @@ const socNom = (id) => { const x = socDe(id); return x ? x.alias || x.nombre : "
 const multiSoc = () => S.sociedades.length > 1;
 const pasaSoc = (sid) => !S.socFiltro || sid === S.socFiltro;
 const legById = (id) => S.legajos.find((l) => l.id === id);
+const mesCompra = (c) => { const l = legById(c.legajoId || c.id); return l?.fecha ? mesDe(l.fecha) : c.mes; };
 const socDeCompra = (c) => legById(c.legajoId || c.id)?.sociedadId || "";
 const chipSoc = (sid) => (!multiSoc() ? "" : sid && socDe(sid) ? `<span class="chip soc">${esc(socNom(sid))}</span>` : `<span class="chip warn">Sin sociedad</span>`);
 const socOptions = (sel, vacio = "— Elegí la sociedad —") => `<option value="">${vacio}</option>` + socs().map((x) => `<option value="${esc(x.id)}"${x.id === sel ? " selected" : ""}>${esc(x.alias || x.nombre)}${x.alias && x.nombre && x.alias !== x.nombre ? " · " + esc(x.nombre) : ""}</option>`).join("");
@@ -194,7 +194,6 @@ const TABS = [
   { id: "ingresos", label: "Ingresos" },
   { id: "skus", label: "SKUs ML" },
   { id: "pagos", label: "Pagos", admin: true },
-  { id: "proveedores", label: "Proveedores", admin: true },
   { id: "resumen", label: "Resumen", admin: true },
   { id: "usuarios", label: "Configuración", admin: true },
 ];
@@ -213,7 +212,7 @@ function renderShell() {
     <div class="note" id="iosNote" hidden>Para usarla como app: tocá <b>Compartir</b> <span aria-hidden="true">⬆︎</span> y después <b>Agregar a inicio</b>. <button class="btn small" id="bIosOk">Entendido</button></div>
     <section id="v-ingresos"></section>
     <section id="v-skus" hidden></section>
-    ${S.admin ? `<section id="v-pagos" hidden></section><section id="v-proveedores" hidden></section><section id="v-resumen" hidden></section><section id="v-usuarios" hidden></section>` : ""}
+    ${S.admin ? `<section id="v-pagos" hidden></section><section id="v-resumen" hidden></section><section id="v-usuarios" hidden></section>` : ""}
   </main></div>
   <datalist id="dlSkus"></datalist><datalist id="dlProv"></datalist>
   <div class="ov" id="ov" hidden><div class="sheet" id="sheet" role="dialog" aria-modal="true"></div></div>`;
@@ -221,7 +220,7 @@ function renderShell() {
   $("#socSel").onchange = (e) => { S.socFiltro = e.target.value; try { localStorage.setItem("socFiltro", S.socFiltro); } catch (_) {} renderIngresos(); renderPagos(); renderResumen(); const is = $("#inSoc"); if (is && !is.value && S.socFiltro) is.value = S.socFiltro; };
   $("#ov").addEventListener("click", (e) => { if (e.target.id === "ov") closeSheet(); });
   initIngresos(); initSkus();
-  if (S.admin) { initPagos(); initProveedores(); initResumen(); initUsuarios(); }
+  if (S.admin) { initPagos(); initResumen(); initUsuarios(); }
   window.onhashchange = route; route();
   subscribeAll();
   pwaUI();
@@ -272,6 +271,56 @@ let sheetRender = null;
 function openSheet(fn) { sheetRender = fn; fn(); $("#ov").hidden = false; document.body.style.overflow = "hidden"; }
 function closeSheet() { sheetRender = null; $("#ov").hidden = true; $("#sheet").innerHTML = ""; $("#sheet").onclick = null; document.body.style.overflow = ""; }
 addEventListener("keydown", (e) => { if (e.key === "Escape" && $("#ov") && !$("#ov").hidden) closeSheet(); });
+
+/* ================= fechas siempre en dd/mm/aaaa ================= */
+// El campo de fecha nativo usa el idioma de Windows/navegador (en inglés: mes/día). Cada input type=date
+// se convierte en un campo de texto dd/mm/aaaa con calendario; el input original queda oculto y sigue
+// siendo el que guarda el valor (YYYY-MM-DD), así el resto del código no cambia.
+const isoAAr = (v) => (/^\d{4}-\d{2}-\d{2}$/.test(v || "") ? `${v.slice(8, 10)}/${v.slice(5, 7)}/${v.slice(0, 4)}` : "");
+function arAIso(t) {
+  const m = String(t || "").trim().match(/^(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2}|\d{4})$/); if (!m) return null;
+  const d = +m[1], mo = +m[2], y = m[3].length === 2 ? 2000 + +m[3] : +m[3];
+  const dt = new Date(y, mo - 1, d); if (dt.getFullYear() !== y || dt.getMonth() !== mo - 1 || dt.getDate() !== d) return null;
+  return `${y}-${String(mo).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+}
+const VALUE = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value");
+function fechaAR(inp) {
+  if (inp.dataset.ar) return; inp.dataset.ar = "1";
+  const wrap = document.createElement("span"); wrap.className = "fecha-wrap";
+  const txt = document.createElement("input"); txt.type = "text"; txt.inputMode = "numeric"; txt.placeholder = "dd/mm/aaaa"; txt.autocomplete = "off"; txt.className = "fecha-txt";
+  txt.setAttribute("aria-label", inp.getAttribute("aria-label") || "Fecha (día/mes/año)");
+  const btn = document.createElement("button"); btn.type = "button"; btn.className = "fecha-cal"; btn.textContent = "📅"; btn.setAttribute("aria-label", "Abrir calendario"); btn.tabIndex = -1;
+  inp.parentNode.insertBefore(wrap, inp); wrap.append(txt, btn, inp); inp.classList.add("fecha-nativa"); inp.tabIndex = -1;
+  Object.defineProperty(inp, "value", { configurable: true, get() { return VALUE.get.call(inp); }, set(v) { VALUE.set.call(inp, v); txt.value = isoAAr(v); txt.classList.remove("bad"); } });
+  txt.value = isoAAr(VALUE.get.call(inp));
+  const avisar = () => { inp.dispatchEvent(new Event("input", { bubbles: true })); inp.dispatchEvent(new Event("change", { bubbles: true })); };
+  txt.addEventListener("input", (e) => {
+    // al tipear solo números pone las barras (05112026 → 05/11/2026); si la persona escribe "/", se respeta lo que tipea
+    if (!txt.value) txt._manual = false;
+    if (e.inputType === "insertText" && (e.data || "").includes("/")) txt._manual = true;
+    if (e.inputType === "insertFromPaste" && txt.value.includes("/")) txt._manual = true;
+    if ((e.inputType === "insertText" || e.inputType === "insertFromPaste") && !txt._manual && /^[\d/]*$/.test(txt.value)) { const dg = txt.value.replace(/\D/g, "").slice(0, 8); txt.value = dg.length > 4 ? `${dg.slice(0, 2)}/${dg.slice(2, 4)}/${dg.slice(4)}` : dg.length > 2 ? `${dg.slice(0, 2)}/${dg.slice(2)}` : dg; }
+    const iso = arAIso(txt.value);
+    if (iso) { VALUE.set.call(inp, iso); txt.classList.remove("bad"); avisar(); }
+    else if (!txt.value.trim()) { VALUE.set.call(inp, ""); txt.classList.remove("bad"); avisar(); }
+  });
+  txt.addEventListener("blur", () => { const t = txt.value.trim(); if (!t) return; const iso = arAIso(t); if (iso) txt.value = isoAAr(iso); else txt.classList.add("bad"); });
+  inp.addEventListener("change", (e) => { if (e.isTrusted) { txt.value = isoAAr(VALUE.get.call(inp)); txt.classList.remove("bad"); avisar(); } });
+  btn.addEventListener("click", () => { try { inp.showPicker(); } catch (_) { inp.focus(); inp.click(); } });
+}
+new MutationObserver((muts) => { for (const m of muts) for (const n of m.addedNodes) { if (n.nodeType !== 1) continue; if (n.matches?.('input[type="date"]')) fechaAR(n); n.querySelectorAll?.('input[type="date"]').forEach(fechaAR); } })
+  .observe(document.documentElement, { childList: true, subtree: true });
+// Fecha impresa ambigua (ej. 03/04/2026): ¿la lectura pudo confundir día y mes?
+const invertirDM = (iso) => { if (!/^\d{4}-\d{2}-\d{2}$/.test(iso || "")) return null; const y = iso.slice(0, 4), mo = +iso.slice(5, 7), d = +iso.slice(8, 10); if (d > 12 || d === mo) return null; return `${y}-${String(d).padStart(2, "0")}-${String(mo).padStart(2, "0")}`; };
+function avisoFecha(fa) {
+  const iso = fa?.fecha; if (!/^\d{4}-\d{2}-\d{2}$/.test(iso || "")) return "";
+  const t = String(fa.fecha_texto || "");
+  const nums = t.match(/(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})/);
+  const avisos = [];
+  if (nums && +nums[1] <= 12 && +nums[2] <= 12 && +nums[1] !== +nums[2]) avisos.push(`La fecha impresa es ${nums[0]} y la tomé como ${fmtFecha(iso)}${fa.formato_fecha === "MDY" ? " (formato EE.UU.: mes primero)" : ""}. Si es al revés, tocá "Invertir día y mes" junto a la fecha.`);
+  const d = diasHasta(iso); if (d > 7) avisos.push(`Ojo: la fecha leída (${fmtFecha(iso)}) es a futuro. Revisala.`); else if (d < -365) avisos.push(`Ojo: la fecha leída (${fmtFecha(iso)}) tiene más de un año. Revisala.`);
+  return avisos.join(" ");
+}
 const firmar = () => ({ por: S.user.uid, porNombre: S.perfil.nombre || S.user.email });
 
 function subscribeAll() {
@@ -607,7 +656,7 @@ function initIngresos() {
       <div class="grid2">
         <label class="f">Proveedor / origen<input type="text" id="inProv" list="dlProv" placeholder="Ej: Centro Estant S.A."><input type="hidden" id="inCuit"></label>
         <label class="f">N° de factura<input type="text" id="inFact" class="mono" placeholder="Ej: A 0012-00008441"></label>
-        <label class="f">Fecha<input type="date" id="inFecha"></label>
+        <label class="f">Fecha<input type="date" id="inFecha"><button type="button" class="linkbtn" id="bInvFecha" hidden>⇄ Invertir día y mes</button></label>
         <label class="f">Condición de pago<select id="inCond"><option value="">— Sin definir —</option>${condOptions("")}</select></label>
         <label class="f">Días<input type="text" inputmode="numeric" id="inDias" placeholder="Ej: 60"></label>
         <label class="f">Vencimiento<input type="date" id="inVenc"></label>
@@ -651,6 +700,8 @@ function initIngresos() {
   $("#inVenc").addEventListener("input", () => { vencManual = !!$("#inVenc").value; });
   window.__resetVenc = () => { vencManual = false; };
   $("#inProv").addEventListener("change", () => aplicarProveedor());
+  $("#bInvFecha").onclick = () => { const v = invertirDM($("#inFecha").value); if (!v) return; $("#inFecha").value = v; $("#inFecha").dispatchEvent(new Event("change", { bubbles: true })); scanMsg(`Fecha cambiada a ${fmtFecha(v)}.`); };
+  $("#inFecha").addEventListener("change", () => { $("#bInvFecha").hidden = !invertirDM($("#inFecha").value); });
   $$("input[name=tipo]", f).forEach((r) => r.addEventListener("change", () => { syncTipo(); $("#inMon").value = TIPOS[tipoSel()].mon; edForm.totales(); }));
   $("#bNuevo").onclick = () => { resetFormL(); f.hidden = false; $("#bNuevo").hidden = true; f.scrollIntoView({ block: "start" }); };
   $("#bCancL").onclick = () => { resetFormL(); f.hidden = true; $("#bNuevo").hidden = false; };
@@ -671,7 +722,8 @@ function initIngresos() {
       const fa = r.fa;
       if (fa.proveedor) $("#inProv").value = fa.proveedor;
       if (fa.numero) $("#inFact").value = [String(fa.tipo_comprobante || "").replace(/^Factura\s*/i, ""), fa.numero].filter(Boolean).join(" ");
-      if (/^\d{4}-\d{2}-\d{2}$/.test(fa.fecha || "")) $("#inFecha").value = fa.fecha;
+      if (/^\d{4}-\d{2}-\d{2}$/.test(fa.fecha || "")) { $("#inFecha").value = fa.fecha; $("#bInvFecha").hidden = !invertirDM(fa.fecha); }
+      x_avisoFecha = avisoFecha(fa);
       if (fa.cuit) $("#inCuit").value = fa.cuit;
       x_avisoSoc = aplicarSociedad(fa.receptor);
       aplicarCondicion(fa);
@@ -685,7 +737,7 @@ function initIngresos() {
       staged = staged.filter((s) => !s.escaneada);
       staged.unshift({ file: new File([r.blob], r.nombre, { type: r.mime }), mime: r.mime, tipoDoc: tipoSel() === "contenedor" ? "factura_despacho" : "factura", url: r.mime.startsWith("image/") ? URL.createObjectURL(r.blob) : null, escaneada: true });
       renderStaged();
-      scanMsg(x.msg + (x_avisoCond ? " " + x_avisoCond : "") + (x_avisoSoc ? " " + x_avisoSoc.txt : ""), x.alerta || x_avisoSoc?.err ? "err" : ""); x_avisoCond = ""; x_avisoSoc = null;
+      scanMsg(x.msg + (x_avisoCond ? " " + x_avisoCond : "") + (x_avisoSoc ? " " + x_avisoSoc.txt : "") + (x_avisoFecha ? " " + x_avisoFecha : ""), x.alerta || x_avisoSoc?.err || x_avisoFecha ? "err" : ""); x_avisoCond = ""; x_avisoSoc = null; x_avisoFecha = "";
     } catch (err) { console.error(err); scanMsg(err.message || "No se pudo leer la factura.", "err"); }
     finally { lbl.classList.remove("busy"); }
   };
@@ -710,7 +762,8 @@ async function escanearImportacion(files) {
         det.push("invoice_mercaderia");
         if (inv.proveedor) $("#inProv").value = inv.proveedor;
         if (inv.numero) $("#inFact").value = [String(inv.tipo_comprobante || "").replace(/^(Commercial\s*)?Invoice\s*/i, ""), inv.numero].filter(Boolean).join(" ");
-        if (/^\d{4}-\d{2}-\d{2}$/.test(inv.fecha || "")) $("#inFecha").value = inv.fecha;
+        if (/^\d{4}-\d{2}-\d{2}$/.test(inv.fecha || "")) { $("#inFecha").value = inv.fecha; $("#bInvFecha").hidden = !invertirDM(inv.fecha); }
+        { const af = avisoFecha(inv); if (af) { partes.push(af); alerta = true; } }
         if (inv.cuit) $("#inCuit").value = inv.cuit;
         { const a = aplicarSociedad(inv.receptor); if (a) { partes.push(a.txt); alerta = alerta || a.err; } }
         if (inv.moneda === "USD" || inv.moneda === "ARS") $("#inMon").value = inv.moneda;
@@ -741,7 +794,7 @@ async function escanearImportacion(files) {
   lbl.classList.remove("busy");
 }
 // Completa la sociedad con el comprador que figura en el documento. Devuelve {txt, err} o null
-let x_avisoSoc = null;
+let x_avisoSoc = null, x_avisoFecha = "";
 function aplicarSociedad(rec) {
   if (!S.sociedades.length || !rec || (!rec.cuit && !rec.nombre)) return null;
   const sel = $("#inSoc"); const m = socMatch(rec);
@@ -812,7 +865,7 @@ function renderStaged() {
 }
 function errL(t) { $("#formLErr").textContent = t || ""; $("#formLErr").hidden = !t; }
 function resetFormL() {
-  $("#formL").reset(); $("input[name=tipo][value=local]").checked = true; $("#inFecha").value = hoy(); $("#inMon").value = "ARS"; window.__resetVenc?.(); $("#provNote").hidden = true;
+  $("#formL").reset(); $("input[name=tipo][value=local]").checked = true; $("#inFecha").value = hoy(); $("#bInvFecha").hidden = true; $("#inMon").value = "ARS"; window.__resetVenc?.(); $("#provNote").hidden = true;
   renderSociedades(); $("#inSoc").value = S.socFiltro || (S.sociedades.length === 1 ? S.sociedades[0].id : "");
   staged.forEach((s) => s.url && URL.revokeObjectURL(s.url)); staged = []; renderStaged(); syncTipo(); errL(""); scanMsg(""); $("#progL").textContent = "";
   edForm?.set(); gastosForm?.set();
@@ -841,7 +894,7 @@ function batchCompra(bt, id, { fecha, proveedor, factura, moneda, items, impuest
   bt.set(doc(db, "comprasMontos", id), {
     mes: mesDe(fecha), moneda, items: montos, bruto, bonif, neto, total: neto, impuestos, impTotal, totalFactura: +(neto + impTotal).toFixed(2),
     extra, costoNeto: +(neto - (extra?.importe || 0)).toFixed(2),
-    ...(existente && S.montos[id]?.pagos ? { pagos: S.montos[id].pagos, pagado: S.montos[id].pagado ?? 0 } : {}),
+    ...(existente ? conservarPago(S.montos[id]) : {}),
     sinPrecio: items.filter((it) => !it.pu).length, creadoEn: nowISO(),
   });
 }
@@ -918,7 +971,7 @@ function renderIngresos() {
   }).join("");
 }
 function openIngreso(id) {
-  const st = { confirmDel: false, confirmFile: null, msg: "", edit: false, ed: null, ged: null, scanMsg: "", lock: false, editCond: false, pagoForm: null, confirmPago: null };
+  const st = { confirmDel: false, confirmFile: null, msg: "", edit: false, ed: null, ged: null, scanMsg: "", lock: false, editCond: false, editDatos: false, pagoForm: null, confirmPago: null };
   const urls = {};
   const draw = (force) => {
     const l = S.legajos.find((x) => x.id === id); const sh = $("#sheet");
@@ -939,6 +992,17 @@ function openIngreso(id) {
     const fc = m ? factorCosto(m) : 1; const conAjuste = m && Math.abs(fc - 1) > 0.0001; const NC = 8 + (conAjuste ? 1 : 0) + (cp ? 1 : 0);
     const prodRows = (c?.items || []).map((it, i) => { const p = m?.items?.[i]; const iva = p?.iva ?? 21; return `<tr><td class="sku">${esc(it.sku)}</td><td>${esc(it.desc)}</td><td class="num">${fmtCant(it.cant)}</td>${S.admin ? `<td class="num">${p?.lista ? fmtNum(p.lista, 2) : "—"}</td><td class="num">${p?.dto ? esc(p.dto) + "%" : "—"}</td><td class="num">${p ? fmtNum(p.pu, 2) : "—"}</td><td class="num">${p ? fmtNum(p.pu * (1 + iva / 100), 2) : "—"}</td><td class="num">${p ? fmtNum(p.subtotal, 2) : "—"}</td>${conAjuste ? `<td class="num" style="font-weight:600">${p ? fmtNum(p.pu * fc, 2) : "—"}</td>` : ""}${cp ? `<td class="num" style="font-weight:600">${p ? fmtNum(unitPuesto(p, m, cp), 2) : "—"}</td>` : ""}` : ""}</tr>`; }).join("");
     const condTxt = [l.condicionPago, l.diasPago != null && !/d[ií]as/i.test(l.condicionPago || "") ? `${l.diasPago} días` : ""].filter(Boolean).join(" · ");
+    const campo = (lbl, id, val, extra = "") => `<label class="f">${lbl}<input type="text" id="${id}" value="${esc(val ?? "")}" ${extra}></label>`;
+    const datosHtml = st.editDatos ? `<div class="panel tight"><b>Datos del ingreso</b><div class="grid2">
+        ${campo("Proveedor / origen", "edProv", l.proveedor, 'list="dlProv"')}
+        ${campo("N° de factura", "edFact", l.factura, 'class="mono"')}
+        <label class="f">Fecha<input type="date" id="edFecha" value="${esc(l.fecha || "")}"><button type="button" class="linkbtn" id="edInv"${invertirDM(l.fecha) ? "" : " hidden"}>⇄ Invertir día y mes</button></label>
+        ${l.tipo === "courier" ? campo("Empresa courier", "edCourier", l.courier) + campo("N° de guía", "edGuia", l.guia, 'class="mono"') + campo("Bultos", "edBultos", l.bultos, 'inputmode="numeric"') + campo("Peso (kg)", "edPeso", l.peso, 'inputmode="decimal"') + campo("Origen", "edOrigen", l.origen) : ""}
+        ${esImport(l.tipo) ? campo("N° de despacho", "edDesp", l.despacho, 'class="mono"') : ""}
+        ${l.tipo === "contenedor" ? campo("N° de contenedor", "edCont", l.contenedor, 'class="mono"') + campo("Despachante", "edDespachante", l.despachante) : ""}
+      </div>
+      <div class="hint">Si cambiás la fecha y el vencimiento se había calculado por días de plazo, se recalcula solo.</div>
+      <div class="bar"><button class="btn primary small" data-act="savedatos">Guardar</button><button class="btn small" data-act="canceldatos">Cancelar</button></div></div>` : "";
     const condHtml = st.editCond ? `<div class="panel tight"><b>Condición de pago</b><div class="grid2">
         <label class="f">Condición<select id="ecCond"><option value="">— Sin definir —</option>${condOptions(l.condicionPago || "")}</select></label>
         <label class="f">Días<input type="text" inputmode="numeric" id="ecDias" value="${l.diasPago ?? ""}"></label>
@@ -946,26 +1010,11 @@ function openIngreso(id) {
         <label class="f">Entregar valores antes del<input type="date" id="ecValores" value="${esc(l.entregaValores || "")}"></label></div>
         <div class="bar"><button class="btn primary small" data-act="savecond">Guardar</button><button class="btn small" data-act="cancelcond">Cancelar</button></div></div>`
       : `<div class="condline"><span><b>Pago:</b> ${condTxt ? esc(condTxt) : '<span class="hint">sin condición cargada</span>'}${l.vencimiento ? ` · vence <b>${fmtFecha(l.vencimiento)}</b>` : ""}${l.entregaValores ? ` · entregar valores antes del <b>${fmtFecha(l.entregaValores)}</b>` : ""}</span>${chipVence(l, m)}<button class="btn small" data-act="editcond">Editar</button></div>`;
-    const pagosDe = (k, m, titulo) => {
-      const pag = pagadoDe(m), sal = saldoDe(m);
-      const est = estadoPago(m);
-      return `<div class="sep"></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap"><b>${titulo} <span class="chip lock">Admin</span></b>${est === "pagado" ? '<span class="chip ok">Pagado</span>' : est === "enviado" ? '<span class="chip info">Cheques enviados · falta que se cobren</span>' : st.pagoForm ? "" : `<button class="btn small primary" data-act="pagoform" data-k="${k}">+ Registrar pago / cheques</button>`}</div>
-      <div class="totbox" style="justify-content:flex-start"><div><span>Total factura</span><b>${fmtMon(totF(m), m.moneda)}</b></div><div><span>Pagado</span><b>${fmtMon(pag, m.moneda)}</b></div><div class="big"><span>Saldo</span><b>${fmtMon(Math.max(0, sal), m.moneda)}</b></div></div>
-      ${(m.pagos || []).length ? `<div class="files">${m.pagos.map((p, i) => `<div class="frow"><span class="txt"><b>${fmtMon(p.importe, m.moneda)} · ${esc(p.medio || "")}${p.numero ? " N° " + esc(p.numero) : ""}</b><small>${p.estado === "enviado" ? `Enviado ${fmtFecha(p.fecha)}${p.fechaCobro ? " · se cobra el " + fmtFecha(p.fechaCobro) : ""}` : `Pagado ${fmtFecha(p.fechaAcreditado || p.fecha)}`}${p.banco ? " · " + esc(p.banco) : ""}${p.nota ? " · " + esc(p.nota) : ""} · cargó ${esc(p.porNombre || "")}</small></span>${p.estado === "enviado" ? `<span class="chip info">Enviado</span><button class="btn small" data-act="cobrado" data-k="${k}" data-i="${i}">Marcar cobrado</button>` : '<span class="chip ok">Pagado</span>'}${st.confirmPago === k + "|" + i ? `<button class="btn small danger" data-act="rmpago-ok" data-k="${k}" data-i="${i}">Borrar</button><button class="btn small" data-act="rmpago-no">No</button>` : `<button class="btn small" data-act="rmpago" data-k="${k}" data-i="${i}" aria-label="Borrar pago">✕</button>`}</div>`).join("")}</div>` : ""}
-      ${st.pagoForm === k ? `<div class="panel tight"><div class="grid2">
-        <label class="f">Fecha<input type="date" id="pFecha" value="${hoy()}"></label>
-        <label class="f">Importe (${esc(m.moneda)})<input type="text" inputmode="decimal" id="pImp" value="${fmtNum(Math.max(0, sal), 2)}"></label>
-        <label class="f">Medio<select id="pMedio">${MEDIOS.map((x) => `<option>${x}</option>`).join("")}</select></label>
-        <label class="f">Estado<select id="pEstado"><option value="pagado">Pagado / acreditado</option><option value="enviado">Enviado / entregado (cheque a cobrar)</option></select></label>
-        <label class="f" data-cheq>Fecha de cobro del cheque<input type="date" id="pCobro"></label>
-        <label class="f" data-cheq>N° de cheque<input type="text" id="pNum" class="mono"></label>
-        <label class="f" data-cheq>Banco<input type="text" id="pBanco"></label>
-        <label class="f">Nota<input type="text" id="pNota" placeholder="Comprobante, a quién se entregó…"></label></div>
-        <div class="hint">Si pagás con varios cheques, cargá uno por vez.</div>
-        <div class="bar"><button class="btn primary small" data-act="pagosave">Guardar pago</button><button class="btn small" data-act="pagocancel">Cancelar</button></div></div>` : ""}`;
-    };
-    const pagoHtml = S.admin && m ? pagosDe("merc", m, esImport(l.tipo) ? "Pagos al proveedor de la mercadería" : "Pagos") : "";
+    const pagosDe = (k, m, titulo) => { const ok = estaPagado(m); return `<div class="sep"></div>
+      <label class="paybox${ok ? " ok" : ""}"><input type="checkbox" data-pay="${k}"${ok ? " checked" : ""}>
+        <span class="txt"><b>${titulo}</b><small>${ok ? `Pagado${m.pagadoEn ? " el " + fmtFecha(m.pagadoEn) : ""}${m.pagadoPorNombre ? " · marcó " + esc(m.pagadoPorNombre) : ""}` : `No pagado · ${fmtMon(totF(m), m.moneda)}${(k === "gast" ? m.vencimiento : l.vencimiento) ? " · vence " + fmtFecha(k === "gast" ? m.vencimiento : l.vencimiento) : ""}`}</small></span>
+        <span class="chip ${ok ? "ok" : "warn"}">${ok ? "Pagado" : "No pagado"}</span></label>`; };
+    const pagoHtml = S.admin && m ? pagosDe("merc", m, esImport(l.tipo) ? "Pago al proveedor de la mercadería" : "Pago de la factura") : "";
     // servicio logístico e impuestos (courier / despachante)
     let gastosHtml = "";
     if (esImport(l.tipo)) {
@@ -978,7 +1027,7 @@ function openIngreso(id) {
           <tfoot><tr><td colspan="2" class="num">Suma al costo</td><td class="num">${fmtNum(g.costo || 0, 2)}</td></tr><tr><td colspan="2" class="num">Crédito fiscal (IVA y percepciones)</td><td class="num">${fmtNum(g.credito || 0, 2)}</td></tr><tr class="grand"><td colspan="2" class="num">Total factura</td><td class="num">${fmtMon(totF(g), g.moneda)}</td></tr></tfoot></table></div>
           ${cp ? `<div class="totbox alt" style="justify-content:flex-start"><div><span>Mercadería en pesos</span><b>${fmtMon(cp.base)}</b></div><div><span>Gastos que son costo</span><b>${fmtMon(cp.gARS)}</b></div><div><span>Incidencia</span><b>${fmtNum(cp.inc * 100, 1)}%</b></div><div class="big"><span>Costo puesto en depósito</span><b>${fmtMon(cp.total)}</b></div></div>`
             : m && m.moneda === "USD" && !g.tc ? `<div class="note err">Cargá el tipo de cambio en la factura logística para calcular el costo puesto de cada producto.</div>` : !m ? `<div class="hint">Cuando cargues los productos con precio se calcula el costo puesto de cada uno.</div>` : ""}
-          ${pagosDe("gast", g, "Pagos al courier / despachante")}`;
+          ${pagosDe("gast", g, "Pago al courier / despachante")}`;
       } else if (S.admin || !l.gastosCargados) {
         gastosHtml = `${cab}<button class="btn small primary" data-act="editgastos">+ Cargar factura logística</button></div><div class="hint">La factura del courier o despachante con flete, servicio, derechos, tasas e impuestos. Se puede escanear.</div>`;
       } else gastosHtml = `${cab}<span class="chip ok">Cargada</span></div><div class="note lock">Los importes de la factura logística solo los ve administración.</div>`;
@@ -998,7 +1047,7 @@ function openIngreso(id) {
       <button class="btn small" data-act="close">Cerrar</button></div>
       ${rec ? `<div class="note">Recibido por ${esc(l.recibidoPorNombre || "—")} · ${fmtFH(l.recibidoEn)}</div>` : ""}
       ${multiSoc() ? `<div class="condline"><span><b>Sociedad:</b></span><select id="dSoc" style="width:auto;flex:1 1 220px" aria-label="Sociedad del ingreso">${socOptions(l.sociedadId || "", "— Sin sociedad —")}</select></div>` : ""}
-      <dl class="kv">${kv}</dl>
+      ${st.editDatos ? datosHtml : `<dl class="kv">${kv}</dl><div class="bar" style="margin-top:-6px"><button class="btn small" data-act="editdatos">Editar datos / fecha</button></div>`}
       ${condHtml}
       ${l.notas ? `<div><div class="hint" style="font-weight:600;text-transform:uppercase;letter-spacing:.06em">Observaciones</div><div style="white-space:pre-wrap">${esc(l.notas)}</div></div>` : ""}
       <div class="sep"></div>
@@ -1023,10 +1072,11 @@ function openIngreso(id) {
         <button class="btn" data-act="notas">Guardar notas</button>
         ${S.admin ? (st.confirmDel ? `<span class="confirm">¿Eliminar ingreso, productos y archivos? <button class="btn small danger" data-act="del-ok">Eliminar</button><button class="btn small" data-act="del-no">Cancelar</button></span>` : `<button class="btn small danger" data-act="del" style="margin-left:auto">Eliminar</button>`) : ""}
       </div>`;
+    const ei = $("#edInv"), ef = $("#edFecha");
+    if (ei && ef) { ei.onclick = () => { const v = invertirDM(ef.value); if (v) { ef.value = v; ei.hidden = !invertirDM(v); } }; ef.addEventListener("change", () => { ei.hidden = !invertirDM(ef.value); }); }
+    $$("#sheet [data-pay]").forEach((cb) => { cb.onchange = async () => { const k = cb.dataset.pay; cb.disabled = true; try { await marcarPagado(k, k === "gast" ? l.id : c.id, cb.checked); st.msg = cb.checked ? "Marcado como pagado." : "Marcado como no pagado."; } catch (_) { st.msg = "!No se pudo guardar."; } draw(true); }; });
     const ds = $("#dSoc");
     if (ds) ds.onchange = async () => { try { await updateDoc(doc(db, "legajos", l.id), { sociedadId: ds.value }); st.msg = "Sociedad actualizada."; } catch (_) { st.msg = "!No se pudo cambiar la sociedad."; } draw(true); };
-    const pm = $("#pMedio");
-    if (pm) { const sync = () => { const ch = esCheque(pm.value); $$("#sheet [data-cheq]").forEach((x) => { x.hidden = !ch; }); $("#pEstado").value = ch ? "enviado" : "pagado"; }; pm.onchange = sync; sync(); }
     (l.archivos || []).forEach((a) => {
       if ((a.mime || "").startsWith("image/") && !urls[a.path]) {
         urls[a.path] = "pending";
@@ -1138,38 +1188,33 @@ function openIngreso(id) {
         if (st.ged.vacio()) { er.textContent = "Cargá al menos un concepto con importe."; er.hidden = false; return; }
         b.disabled = true; const prev = S.admin ? gastosDeLegajo(l) : null; const f = firmar();
         const bt = writeBatch(db);
-        bt.set(doc(db, "gastosImport", l.id), { ...st.ged.valid(), legajoId: l.id, creadoPor: prev?.creadoPor || f.por, creadoPorNombre: prev?.creadoPorNombre || f.porNombre, creadoEn: prev?.creadoEn || nowISO(), ...(prev ? { editadoPorNombre: f.porNombre, editadoEn: nowISO(), pagos: prev.pagos || [], pagado: prev.pagado || 0 } : {}) });
+        bt.set(doc(db, "gastosImport", l.id), { ...st.ged.valid(), legajoId: l.id, creadoPor: prev?.creadoPor || f.por, creadoPorNombre: prev?.creadoPorNombre || f.porNombre, creadoEn: prev?.creadoEn || nowISO(), ...(prev ? { editadoPorNombre: f.porNombre, editadoEn: nowISO(), ...conservarPago(prev) } : {}) });
         bt.update(r, { gastosCargados: true });
         await bt.commit(); st.edit = false; st.msg = "Factura logística guardada.";
       }
       if (act === "editcond") { st.editCond = true; st.lock = true; return draw(true); }
-      if (act === "cancelcond") { st.editCond = false; st.lock = st.pagoForm; return draw(true); }
+      if (act === "editdatos") { st.editDatos = true; st.lock = true; return draw(true); }
+      if (act === "canceldatos") { st.editDatos = false; st.lock = st.editCond; return draw(true); }
+      if (act === "savedatos") {
+        const fecha = $("#edFecha").value; if (!fecha) { st.msg = "!Poné una fecha válida (dd/mm/aaaa)."; return draw(true); }
+        const v = (id) => ($("#" + id) ? $("#" + id).value.trim() : undefined);
+        const upd = { proveedor: v("edProv"), factura: v("edFact"), fecha };
+        if (l.tipo === "courier") Object.assign(upd, { courier: v("edCourier"), guia: v("edGuia"), bultos: v("edBultos") ? parseNum(v("edBultos")) : null, peso: v("edPeso") ? parseNum(v("edPeso")) : null, origen: v("edOrigen") });
+        if (esImport(l.tipo)) upd.despacho = v("edDesp");
+        if (l.tipo === "contenedor") Object.assign(upd, { contenedor: v("edCont"), despachante: v("edDespachante") });
+        // vencimiento calculado por plazo → se mueve con la fecha
+        if (fecha !== l.fecha && l.diasPago != null && l.vencimiento === sumarDias(l.fecha, l.diasPago)) upd.vencimiento = sumarDias(fecha, l.diasPago);
+        b.disabled = true; await updateDoc(r, upd);
+        // la cabecera de la compra (solo administración puede editarla)
+        if (c && S.admin) { try { const bt = writeBatch(db); bt.update(doc(db, "compras", c.id), { fecha, mes: mesDe(fecha), proveedor: upd.proveedor, factura: upd.factura }); if (S.montos[c.id]) bt.update(doc(db, "comprasMontos", c.id), { mes: mesDe(fecha) }); await bt.commit(); } catch (_) {} }
+        st.editDatos = false; st.lock = st.editCond; st.msg = "Datos guardados."; return draw(true);
+      }
+      if (act === "cancelcond") { st.editCond = false; st.lock = st.editDatos; return draw(true); }
       if (act === "savecond") {
         b.disabled = true; const d = $("#ecDias").value.trim();
         await updateDoc(r, { condicionPago: $("#ecCond").value, diasPago: d === "" ? null : parseNum(d), vencimiento: $("#ecVenc").value || (d !== "" ? sumarDias(l.fecha, parseNum(d)) : ""), entregaValores: $("#ecValores").value || "" });
-        st.editCond = false; st.lock = st.pagoForm; st.msg = "Condición de pago guardada."; return draw(true);
+        st.editCond = false; st.lock = st.editDatos; st.msg = "Condición de pago guardada."; return draw(true);
       }
-      if (act === "pagoform") { st.pagoForm = b.dataset.k; st.lock = true; return draw(true); }
-      if (act === "pagocancel") { st.pagoForm = null; st.lock = st.editCond; return draw(true); }
-      const pk = act === "pagosave" ? st.pagoForm : b.dataset.k || "merc";
-      const pid = pk === "gast" ? l.id : c?.id;
-      if (act === "pagosave" || act === "rmpago-ok") {
-        const mm = pid && PAY[pk].src()[pid]; if (!mm) return;
-        let pagos = [...(mm.pagos || [])];
-        if (act === "pagosave") {
-          const imp = parseNum($("#pImp").value); if (!imp) { st.msg = "!Poné el importe del pago."; return draw(true); }
-          const f = firmar(); const cheq = esCheque($("#pMedio").value);
-          pagos.push({ fecha: $("#pFecha").value || hoy(), importe: +imp.toFixed(2), medio: $("#pMedio").value, estado: $("#pEstado").value, nota: $("#pNota").value.trim(),
-            ...(cheq ? { numero: $("#pNum").value.trim(), banco: $("#pBanco").value.trim(), fechaCobro: $("#pCobro").value || "" } : {}),
-            ...($("#pEstado").value === "pagado" ? { fechaAcreditado: $("#pFecha").value || hoy() } : {}), por: f.por, porNombre: f.porNombre, en: nowISO() });
-        } else pagos = pagos.filter((_, j) => j !== +b.dataset.i);
-        b.disabled = true;
-        await guardarPagos(pid, pagos, pk);
-        st.pagoForm = null; st.confirmPago = null; st.lock = st.editCond; st.msg = act === "pagosave" ? "Pago registrado." : "Pago borrado."; return draw(true);
-      }
-      if (act === "rmpago") { st.confirmPago = pk + "|" + b.dataset.i; return draw(true); }
-      if (act === "cobrado") { const mm = PAY[pk].src()[pid]; const pagos = mm.pagos.map((p, j) => j === +b.dataset.i ? { ...p, estado: "pagado", fechaAcreditado: hoy() } : p); b.disabled = true; await guardarPagos(pid, pagos, pk); st.msg = "Cheque marcado como cobrado."; return draw(true); }
-      if (act === "rmpago-no") { st.confirmPago = null; return draw(true); }
       if (act === "canceledit") { st.edit = false; return draw(); }
       if (act === "saveprod") {
         const items = st.ed.valid(); const err = $("#edErr");
@@ -1282,41 +1327,41 @@ function initPagos() {
   $("#v-pagos").innerHTML = `<div style="display:grid;gap:14px">
     <div class="bar"><span class="h2">Agenda de pagos</span><span class="chip lock">Solo administración</span><span style="flex:1"></span>
       <button class="btn" id="bCopPag" type="button">Copiar próximos pagos</button><button class="btn" id="bCsvPag" type="button">Exportar CSV</button></div>
+    <div class="hint">Marcá "Pagado" cuando se pague en el sistema de gestión. Los vencimientos salen de la condición de pago de cada proveedor.</div>
     <div id="pagStats"></div>
-    <div class="bar"><div class="seg" role="group" aria-label="Filtro"><button type="button" data-p="pend" aria-pressed="true">A pagar</button><button type="button" data-p="env" aria-pressed="false">Cheques enviados</button><button type="button" data-p="pag" aria-pressed="false">Pagados</button><button type="button" data-p="all" aria-pressed="false">Todos</button></div>
+    <div class="bar"><div class="seg" role="group" aria-label="Filtro"><button type="button" data-p="pend" aria-pressed="true">No pagados</button><button type="button" data-p="pag" aria-pressed="false">Pagados</button><button type="button" data-p="all" aria-pressed="false">Todos</button></div>
       <input class="grow" type="search" id="qP" placeholder="Buscar proveedor o factura" aria-label="Buscar pagos"></div>
     <div class="note" id="pagMsg" hidden></div>
     <div id="pagList"></div></div>`;
   $$("#v-pagos .seg button").forEach((b) => b.onclick = () => { pagFiltro = b.dataset.p; $$("#v-pagos .seg button").forEach((x) => x.setAttribute("aria-pressed", String(x === b))); renderPagos(); });
   $("#qP").oninput = renderPagos;
-  $("#pagList").addEventListener("click", async (e) => {
-    const cb = e.target.closest("[data-cobrado]");
-    if (cb) { e.stopPropagation(); const [k, cid, i] = cb.dataset.cobrado.split("|"); const mm = PAY[k].src()[cid]; cb.disabled = true; try { await guardarPagos(cid, mm.pagos.map((p, j) => j === +i ? { ...p, estado: "pagado", fechaAcreditado: hoy() } : p), k); } catch (_) { cb.disabled = false; } return; }
-    const b = e.target.closest("[data-open]"); if (b) openIngreso(b.dataset.open);
+  $("#pagList").addEventListener("change", async (e) => {
+    const cb = e.target.closest("[data-pagado]"); if (!cb) return;
+    const [k, id] = cb.dataset.pagado.split("|"); cb.disabled = true;
+    try { await marcarPagado(k, id, cb.checked); } catch (_) { cb.checked = !cb.checked; cb.disabled = false; }
   });
+  $("#pagList").addEventListener("click", (e) => { if (e.target.closest(".paycheck")) return; const b = e.target.closest("[data-open]"); if (b) openIngreso(b.dataset.open); });
   $("#bCopPag").onclick = async () => {
     const rows = filasPago().filter((x) => !x.pagado && x.venc && diasHasta(x.venc) <= 30).sort((a, b) => (a.venc > b.venc ? 1 : -1));
-    const chq = filasPago().flatMap((x) => (x.m.pagos || []).filter((p) => p.estado === "enviado").map((p) => `• ${p.fechaCobro ? fmtFecha(p.fechaCobro) : "s/fecha"} — ${x.prov || ""} — ${fmtMon(p.importe, x.m.moneda)} · ${p.medio}${p.numero ? " N° " + p.numero : ""}`));
-    const linea = (x) => { const d = diasHasta(x.venc); return `• ${fmtFecha(x.venc)}${d < 0 ? " (VENCIDO)" : ""} — ${x.prov || ""}${x.k === "gast" ? " (logística)" : ""}${x.fact ? " · Fact. " + x.fact : ""} — ${fmtMon(x.saldo, x.m.moneda)}${x.cond ? " · " + x.cond : ""}${x.valores ? " · valores antes del " + fmtFecha(x.valores) : ""}`; };
-    // con varias sociedades, un bloque por empresa (cada una paga desde su cuenta)
+    const linea = (x) => { const d = diasHasta(x.venc); return `• ${fmtFecha(x.venc)}${d < 0 ? " (VENCIDO)" : ""} — ${x.prov || ""}${x.k === "gast" ? " (logística)" : ""}${x.fact ? " · Fact. " + x.fact : ""} — ${fmtMon(totF(x.m), x.m.moneda)}${x.cond ? " · " + x.cond : ""}${x.valores ? " · valores antes del " + fmtFecha(x.valores) : ""}`; };
     const grupos = multiSoc() ? [...new Set(rows.map((x) => x.l.sociedadId || ""))].map((sid) => ({ t: sid ? socNom(sid) : "Sin sociedad", r: rows.filter((x) => (x.l.sociedadId || "") === sid) })) : [{ t: "", r: rows }];
     const titulo = "Próximos pagos" + (S.socFiltro ? " " + socNom(S.socFiltro) : multiSoc() ? "" : " NIVIKO");
-    const txt = (rows.length ? titulo + "\n" + grupos.map((g) => (g.t && grupos.length > 1 ? `\n*${g.t}*\n` : "") + g.r.map(linea).join("\n")).join("\n") : "No hay pagos pendientes en los próximos 30 días.") + (chq.length ? "\n\nCheques enviados a cobrar\n" + chq.join("\n") : "");
+    const txt = rows.length ? titulo + "\n" + grupos.map((g) => (g.t && grupos.length > 1 ? `\n*${g.t}*\n` : "") + g.r.map(linea).join("\n")).join("\n") : "No hay pagos pendientes en los próximos 30 días.";
     const n = $("#pagMsg");
     try { await navigator.clipboard.writeText(txt); n.textContent = "Copiado. Pegalo en WhatsApp o en un mail."; }
     catch { n.textContent = txt; }
     n.hidden = false; setTimeout(() => { n.hidden = true; }, 6000);
   };
-  $("#bCsvPag").onclick = () => descargarCSV(`agenda-pagos-${hoy()}.csv`, [["Sociedad", "Vencimiento", "Entregar valores antes", "Acreedor", "Concepto", "Factura", "Condición", "Moneda", "Total factura", "Pagado", "Saldo", "Estado"],
-    ...filasPago().sort((a, b) => ((a.venc || "9") > (b.venc || "9") ? 1 : -1)).map((x) => [socNom(x.l.sociedadId), x.venc, x.valores, x.prov, x.k === "gast" ? "Servicio logístico e impuestos" : "Mercadería", x.fact, x.cond, x.m.moneda, totF(x.m), pagadoDe(x.m), x.saldo, x.est === "pagado" ? "Pagado" : x.est === "enviado" ? "Cheques enviados" : x.est === "parcial" ? "Parcial" : "Pendiente"])]);
+  $("#bCsvPag").onclick = () => descargarCSV(`agenda-pagos-${hoy()}.csv`, [["Sociedad", "Vencimiento", "Entregar valores antes", "Acreedor", "Concepto", "Factura", "Condición", "Moneda", "Total factura", "Estado", "Pagado el"],
+    ...filasPago().sort((a, b) => ((a.venc || "9") > (b.venc || "9") ? 1 : -1)).map((x) => [socNom(x.l.sociedadId), x.venc, x.valores, x.prov, x.k === "gast" ? "Servicio logístico e impuestos" : "Mercadería", x.fact, x.cond, x.m.moneda, totF(x.m), x.pagado ? "Pagado" : "No pagado", x.m.pagadoEn || ""])]);
 }
 function filasPago() {
-  const out = []; const est = (m) => ({ saldo: Math.max(0, saldoDe(m)), pagado: estaPagado(m), est: estadoPago(m) });
+  const out = [];
   S.legajos.forEach((l) => {
     const c = compraDe(l); const m = c && S.montos[c.id];
-    if (m) out.push({ l, m, k: "merc", id: c.id, prov: l.proveedor, fact: l.factura, cond: l.condicionPago, venc: l.vencimiento, valores: l.entregaValores, sub: "", ...est(m) });
+    if (m) out.push({ l, m, k: "merc", id: c.id, prov: l.proveedor, fact: l.factura, cond: l.condicionPago, venc: l.vencimiento, valores: l.entregaValores, sub: "", pagado: estaPagado(m) });
     const g = S.gastos[l.id];
-    if (g && totF(g)) out.push({ l, m: g, k: "gast", id: l.id, prov: g.emisor || l.courier || "Courier / despachante", fact: g.factura, cond: g.condicionPago, venc: g.vencimiento, valores: "", sub: `Servicio logístico e impuestos · ${l.proveedor || ""}`, ...est(g) });
+    if (g && totF(g)) out.push({ l, m: g, k: "gast", id: l.id, prov: g.emisor || l.courier || "Courier / despachante", fact: g.factura, cond: g.condicionPago, venc: g.vencimiento, valores: "", sub: `Servicio logístico e impuestos · ${l.proveedor || ""}`, pagado: estaPagado(g) });
   });
   return out.filter((x) => pasaSoc(x.l.sociedadId));
 }
@@ -1326,61 +1371,135 @@ function renderPagos() {
   setCount("pagos", pend.filter((x) => x.venc && diasHasta(x.venc) <= 7).length);
   if ($("#v-pagos").hidden) return;
   if (!S.loaded.legajos || !S.loaded.montos || !S.loaded.gastos) { $("#pagList").innerHTML = `<div class="empty"><b>Cargando…</b></div>`; return; }
-  const sum = (arr) => arr.reduce((a, x) => { a[x.m.moneda] = (a[x.m.moneda] || 0) + x.saldo; return a; }, {});
+  const sum = (arr) => arr.reduce((a, x) => { a[x.m.moneda] = (a[x.m.moneda] || 0) + totF(x.m); return a; }, {});
   const fmtS = (o) => Object.entries(o).map(([mon, v]) => fmtMon(v, mon)).join(" + ") || "—";
-  const cheques = filasPago().flatMap((x) => (x.m.pagos || []).map((p, i) => ({ p, i, prov: x.prov, mon: x.m.moneda, k: x.k, cid: x.id })).filter((y) => y.p.estado === "enviado")).sort((a, b) => ((a.p.fechaCobro || "9") > (b.p.fechaCobro || "9") ? 1 : -1));
-  const venc = pend.filter((x) => x.venc && diasHasta(x.venc) < 0), sem = pend.filter((x) => x.venc && diasHasta(x.venc) >= 0 && diasHasta(x.venc) <= 7), mes = pend.filter((x) => x.venc && diasHasta(x.venc) > 7 && diasHasta(x.venc) <= 30);
+  const dd = (x) => diasHasta(x.venc);
+  const venc = pend.filter((x) => x.venc && dd(x) < 0), sem = pend.filter((x) => x.venc && dd(x) >= 0 && dd(x) <= 7), mes = pend.filter((x) => x.venc && dd(x) > 7 && dd(x) <= 30);
   $("#pagStats").innerHTML = `<div class="stats">
     <div class="stat${venc.length ? " alert" : ""}"><b>${fmtS(sum(venc))}</b><span>Vencido · ${venc.length}</span></div>
     <div class="stat"><b>${fmtS(sum(sem))}</b><span>Próximos 7 días · ${sem.length}</span></div>
     <div class="stat"><b>${fmtS(sum(mes))}</b><span>8 a 30 días · ${mes.length}</span></div>
-    <div class="stat"><b>${fmtS(sum(pend))}</b><span>Total a pagar · ${pend.length}</span></div>
-    <div class="stat"><b>${fmtS(cheques.reduce((a, x) => { a[x.mon] = (a[x.mon] || 0) + x.p.importe; return a; }, {}))}</b><span>Cheques sin cobrar · ${cheques.length}</span></div></div>
-    ${cheques.length ? `<div class="panel tight"><b>Cheques enviados a cobrar</b><div class="files">${cheques.map((x) => { const d = diasHasta(x.p.fechaCobro); return `<div class="frow"><span class="txt"><b>${x.p.fechaCobro ? fmtFecha(x.p.fechaCobro) : "Sin fecha"} · ${fmtMon(x.p.importe, x.mon)}</b><small>${esc(x.prov || "")} · ${esc(x.p.medio)}${x.p.numero ? " N° " + esc(x.p.numero) : ""}${x.p.banco ? " · " + esc(x.p.banco) : ""}</small></span>${d != null && d <= 0 ? '<span class="chip warn">Ya se cobra</span>' : d != null ? `<span class="chip info">en ${d} d</span>` : ""}<button class="btn small" data-cobrado="${x.k}|${esc(x.cid)}|${x.i}">Marcar cobrado</button></div>`; }).join("")}</div></div>` : ""}`;
+    <div class="stat"><b>${fmtS(sum(pend))}</b><span>Total no pagado · ${pend.length}</span></div></div>`;
   const q = $("#qP").value.trim().toLowerCase();
-  let rows = filasPago().filter((x) => (pagFiltro === "all" || (pagFiltro === "pend" ? !x.pagado : pagFiltro === "env" ? x.est === "enviado" : x.est === "pagado")) && (!q || [x.prov, x.fact, x.l.proveedor].join(" ").toLowerCase().includes(q)));
-  if (!rows.length) { $("#pagList").innerHTML = `<div class="empty"><b>${pagFiltro === "pend" && !q ? "No hay pagos pendientes ✓" : "Nada con ese filtro"}</b><span>Los pagos salen de los ingresos con productos y precios cargados. La condición de pago se carga en cada ingreso.</span></div>`; return; }
+  const rows = filasPago().filter((x) => (pagFiltro === "all" || (pagFiltro === "pend" ? !x.pagado : x.pagado)) && (!q || [x.prov, x.fact, x.l.proveedor].join(" ").toLowerCase().includes(q)));
+  if (!rows.length) { $("#pagList").innerHTML = `<div class="empty"><b>${pagFiltro === "pend" && !q ? "No hay nada pendiente de pago ✓" : "Nada con ese filtro"}</b><span>Los pagos salen de los ingresos con precios cargados (y de las facturas logísticas).</span></div>`; return; }
   rows.sort((a, b) => ((a.venc || "9999") > (b.venc || "9999") ? 1 : -1));
-  if (pagFiltro === "pag") rows.reverse();
-  const grupo = (x) => { if (x.est === "enviado") return "Cheques enviados (a cobrar)"; if (x.pagado) return "Pagados"; if (!x.venc) return "Sin vencimiento cargado"; const d = diasHasta(x.venc); return d < 0 ? "Vencidos" : d <= 7 ? "Esta semana" : d <= 30 ? "Próximos 30 días" : "Más adelante"; };
+  if (pagFiltro === "pag") rows.sort((a, b) => ((b.m.pagadoEn || "") > (a.m.pagadoEn || "") ? 1 : -1));
+  const grupo = (x) => { if (x.pagado) return "Pagados"; if (!x.venc) return "Sin vencimiento cargado"; const d = dd(x); return d < 0 ? "Vencidos" : d <= 7 ? "Esta semana" : d <= 30 ? "Próximos 30 días" : "Más adelante"; };
   let html = "", g0 = null;
   for (const x of rows) {
     const g = grupo(x); if (g !== g0) { html += `<div class="grouph">${g}</div>`; g0 = g; }
-    const pag = pagadoDe(x.m);
-    html += `<button type="button" class="card ${x.pagado ? "recibido" : g === "Vencidos" ? "" : "neutral"}" data-open="${esc(x.l.id)}">
-      <div class="row1"><span class="ttl">${esc(x.prov || "Sin proveedor")}</span><span class="mono" style="font-weight:600">${fmtMon(x.pagado ? totF(x.m) : x.saldo, x.m.moneda)}</span></div>
+    html += `<div class="card payrow ${x.pagado ? "recibido" : g === "Vencidos" ? "" : "neutral"}" data-open="${esc(x.l.id)}">
+      <div class="row1"><span class="ttl">${esc(x.prov || "Sin proveedor")}</span><span style="display:flex;gap:12px;align-items:center"><span class="mono" style="font-weight:600">${fmtMon(totF(x.m), x.m.moneda)}</span>
+        <label class="check paycheck"><input type="checkbox" data-pagado="${x.k}|${esc(x.id)}"${x.pagado ? " checked" : ""}>Pagado</label></span></div>
       ${x.sub || multiSoc() ? `<div class="meta">${chipSoc(x.l.sociedadId)}${x.sub ? `<span class="chip type">Logística</span><span>${esc(x.sub)}</span>` : ""}</div>` : ""}
-      <div class="meta">${x.fact ? `<span>Fact. <span class="mono">${esc(x.fact)}</span></span>` : ""}<span>${esc(x.cond || "Sin condición")}</span>${x.venc ? `<span>Vence ${fmtFecha(x.venc)}</span>` : ""}${x.valores ? `<span>Valores antes del ${fmtFecha(x.valores)}</span>` : ""}${pag && !x.pagado ? `<span class="chip info">Pago parcial ${fmtMon(pag, x.m.moneda)}</span>` : ""}${chipVence({ vencimiento: x.venc, condicionPago: x.cond }, x.m)}</div></button>`;
+      <div class="meta">${x.fact ? `<span>Fact. <span class="mono">${esc(x.fact)}</span></span>` : ""}<span>${esc(x.cond || "Sin condición")}</span>${x.venc ? `<span>Vence ${fmtFecha(x.venc)}</span>` : ""}${x.valores && !x.pagado ? `<span>Valores antes del ${fmtFecha(x.valores)}</span>` : ""}${x.pagado ? `<span>Pagado${x.m.pagadoEn ? " el " + fmtFecha(x.m.pagadoEn) : ""}</span>` : chipVence({ vencimiento: x.venc, condicionPago: x.cond }, x.m)}</div></div>`;
   }
   $("#pagList").innerHTML = `<div class="list">${html}</div>`;
 }
 
-/* ================= PROVEEDORES (admin) ================= */
-function initProveedores() {
-  $("#v-proveedores").innerHTML = `<div style="display:grid;gap:14px">
-    <div class="bar"><span class="h2">Proveedores y condiciones de pago</span><span class="chip lock">Solo administración</span><span style="flex:1"></span><button class="btn primary" id="bNuevoProv" type="button">+ Proveedor</button></div>
-    <div class="hint">La condición que cargues acá se aplica sola en cada ingreso nuevo de ese proveedor (gana sobre lo que lea el escáner).</div>
-    <input type="search" id="qProv" placeholder="Buscar proveedor" aria-label="Buscar proveedor">
-    <div id="provList"></div></div>`;
-  $("#bNuevoProv").onclick = () => openProveedor(null);
-  $("#qProv").oninput = renderProveedores;
-  $("#provList").addEventListener("click", (e) => { const b = e.target.closest("[data-prov]"); if (b) openProveedor(b.dataset.prov || null, b.dataset.nombre, b.dataset.cuit); });
+/* ================= PROVEEDORES (en Configuración) ================= */
+let provDel = null, provPend = false;
+const numONull = (v) => (String(v ?? "").trim() === "" ? null : parseNum(v));
+// "60" → 60 días · "Contado" · "cta cte" → Cuenta corriente
+function condDeTexto(t) {
+  t = String(t || "").trim(); if (!t) return { condicion: "", dias: null };
+  if (/^\d+$/.test(t)) { const n = +t; return { condicion: CONDS.find((c) => diasDeCond(c) === n && /d[ií]as/.test(c)) || (n === 0 ? "Contado" : "Otra"), dias: n }; }
+  const exact = CONDS.find((c) => c.toLowerCase() === t.toLowerCase()); if (exact) return { condicion: exact, dias: diasDeCond(exact) };
+  const d = diasDeCond(t);
+  if (/cheq/i.test(t)) return { condicion: "Cheque diferido", dias: d };
+  if (/corriente|cta/i.test(t)) return { condicion: "Cuenta corriente", dias: d };
+  if (/contado|efectivo/i.test(t)) return { condicion: "Contado", dias: 0 };
+  if (/anticip/i.test(t)) return { condicion: "Anticipado", dias: 0 };
+  if (d != null) return { condicion: CONDS.find((c) => diasDeCond(c) === d && /d[ií]as/.test(c)) || "Otra", dias: d };
+  return { condicion: "Otra", dias: null };
 }
-function renderProveedores() {
+function initProveedores() {
+  const host = $("#provCfg"); if (!host) return;
+  host.innerHTML = `<div class="bar"><input class="grow" type="search" id="qProv" placeholder="Buscar proveedor" aria-label="Buscar proveedor"><button class="btn small" type="button" id="bPegarProv">Pegar lista desde Excel</button></div>
+    <div id="pegarProv" class="panel tight" hidden>
+      <label class="f">Una fila por proveedor: Proveedor · CUIT · Condición o días · Días para entregar valores
+        <textarea id="txtProv" rows="5" class="mono" placeholder="Centro Estant S.A.	30-70813731-2	60	30&#10;DHL Express Argentina		Contado"></textarea>
+        <span class="hint">Copiá las columnas de Excel y pegalas, o separalas con punto y coma. CUIT y días de valores son opcionales. Si el proveedor ya existe, se actualiza.</span></label>
+      <div class="bar"><button class="btn primary small" type="button" id="bImpProv">Cargar lista</button><button class="btn small" type="button" id="bCancProv">Cerrar</button><span class="hint" id="impProvMsg"></span></div></div>
+    <div id="provList"></div>`;
+  $("#qProv").oninput = renderProveedores;
+  $("#bPegarProv").onclick = () => { $("#pegarProv").hidden = false; $("#txtProv").focus(); };
+  $("#bCancProv").onclick = () => { $("#pegarProv").hidden = true; };
+  $("#bImpProv").onclick = async () => {
+    const filas = $("#txtProv").value.split(/\r?\n/).map((x) => x.split(/\t|;/).map((y) => y.trim())).filter((c) => c[0]);
+    if (!filas.length) { $("#impProvMsg").textContent = "Pegá al menos una fila."; return; }
+    const bt = writeBatch(db); let nuevos = 0, act = 0;
+    for (const [nombre, cuit = "", cond = "", val = ""] of filas) {
+      const cd = condDeTexto(cond); const ex = provDe(nombre, cuit);
+      const data = { nombre, ...(cuit ? { cuit } : {}), ...(cond ? { condicion: cd.condicion, dias: cd.dias } : {}), ...(val !== "" ? { diasValores: numONull(val) } : {}), alias: [...new Set([normProv(nombre), ...(ex?.alias || [])])], editadoEn: nowISO() };
+      bt.set(doc(db, "proveedores", ex ? ex.id : doc(collection(db, "proveedores")).id), data, { merge: true }); ex ? act++ : nuevos++;
+    }
+    try { await bt.commit(); $("#txtProv").value = ""; $("#impProvMsg").textContent = `${nuevos} nuevo${nuevos === 1 ? "" : "s"} · ${act} actualizado${act === 1 ? "" : "s"}.`; }
+    catch (e) { console.error(e); $("#impProvMsg").textContent = "No se pudo guardar. ¿Publicaste las reglas de Firestore?"; }
+  };
+  const list = $("#provList");
+  // guardar al salir de cada campo
+  list.addEventListener("change", async (e) => {
+    const tr = e.target.closest("tr[data-pid]"); const f = e.target.dataset.f; if (!tr || !f) return;
+    const id = tr.dataset.pid; const v = e.target.value.trim(); const upd = {};
+    if (f === "dias" || f === "diasValores") upd[f] = numONull(v);
+    else if (f === "condicion") { upd.condicion = v; const d = diasDeCond(v); if (d != null) { upd.dias = d; const di = tr.querySelector('[data-f="dias"]'); if (di) di.value = d; } }
+    else if (f === "nombre") { if (!v) return; upd.nombre = v; upd.alias = [...new Set([normProv(v), ...(S.proveedores.find((x) => x.id === id)?.alias || [])])]; }
+    else upd[f] = v;
+    upd.editadoEn = nowISO();
+    try { await updateDoc(doc(db, "proveedores", id), upd); tr.classList.add("saved"); setTimeout(() => tr.classList.remove("saved"), 900); }
+    catch (_) { tr.classList.add("err"); }
+  });
+  list.addEventListener("focusout", () => { setTimeout(() => { if (provPend && !list.contains(document.activeElement)) { provPend = false; renderProveedores(); } }, 0); });
+  list.addEventListener("click", async (e) => {
+    const t = e.target.closest("[data-pa]"); if (!t) return; const tr = t.closest("tr"); const act = t.dataset.pa;
+    if (act === "mas") return openProveedor(tr.dataset.pid);
+    if (act === "del") { provDel = tr.dataset.pid; return renderProveedores(true); }
+    if (act === "del-no") { provDel = null; return renderProveedores(true); }
+    if (act === "del-ok") { try { await deleteDoc(doc(db, "proveedores", tr.dataset.pid)); } catch (_) {} provDel = null; return renderProveedores(true); }
+    if (act === "add") {
+      const g = (k) => tr.querySelector(`[data-n="${k}"]`)?.value.trim() || "";
+      const nombre = g("nombre"); if (!nombre) { tr.querySelector('[data-n="nombre"]')?.focus(); return; }
+      if (provDe(nombre, g("cuit"))) { t.textContent = "Ya existe"; return; }
+      const cond = g("condicion"); const dias = numONull(g("dias"));
+      t.disabled = true;
+      try { await setDoc(doc(collection(db, "proveedores")), { nombre, cuit: g("cuit"), condicion: cond, dias: dias ?? diasDeCond(cond), diasValores: numONull(g("diasValores")), medio: "", contacto: "", notas: "", alias: [normProv(nombre)], editadoEn: nowISO() }); }
+      catch (err) { console.error(err); t.disabled = false; t.textContent = "Error"; }
+    }
+  });
+}
+function renderProveedores(force) {
   const dl = $("#dlProv"); if (dl) dl.innerHTML = [...new Set([...S.proveedores.map((p) => p.nombre), ...S.legajos.map((l) => l.proveedor).filter(Boolean)])].slice(0, 500).map((n) => `<option value="${esc(n)}">`).join("");
   const el = $("#provList"); if (!el) return;
-  if (!S.loaded.proveedores) { el.innerHTML = `<div class="empty"><b>Cargando…</b></div>`; return; }
-  const q = $("#qProv").value.trim().toLowerCase();
-  // proveedores que aparecen en ingresos pero todavía no tienen condición configurada
+  if (force !== true && el.contains(document.activeElement)) { provPend = true; return; } // no pisar lo que se está escribiendo
+  if (!S.loaded.proveedores) { el.innerHTML = `<div class="hint">Cargando…</div>`; return; }
+  const q = ($("#qProv")?.value || "").trim().toLowerCase();
   const sinConf = []; const vistos = new Set();
   S.legajos.forEach((l) => { if (!l.proveedor) return; const n = normProv(l.proveedor); if (vistos.has(n) || provDe(l.proveedor, l.cuit)) return; vistos.add(n); sinConf.push(l); });
-  const rows = S.proveedores.filter((p) => !q || [p.nombre, p.cuit].join(" ").toLowerCase().includes(q)).sort((a, b) => a.nombre.localeCompare(b.nombre));
+  const rows = S.proveedores.filter((p) => !q || [p.nombre, p.cuit].join(" ").toLowerCase().includes(q)).sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""));
   const sc = sinConf.filter((l) => !q || l.proveedor.toLowerCase().includes(q));
-  el.innerHTML = `<div class="list">${rows.map((p) => { const n = S.legajos.filter((l) => provDe(l.proveedor, l.cuit)?.id === p.id).length; return `<button type="button" class="card neutral" data-prov="${esc(p.id)}">
-      <div class="row1"><span class="ttl">${esc(p.nombre)}</span><span class="chip ${p.condicion ? "ok" : "warn"}">${esc([p.condicion, p.dias != null && p.dias !== "" && !/d[ií]as/.test(p.condicion || "") ? p.dias + " días" : ""].filter(Boolean).join(" · ") || "Sin condición")}</span></div>
-      <div class="meta">${p.cuit ? `<span class="mono">CUIT ${esc(p.cuit)}</span>` : ""}${p.diasValores ? `<span>Valores a ${p.diasValores} días</span>` : ""}${p.medio ? `<span>${esc(p.medio)}</span>` : ""}${p.contacto ? `<span>${esc(p.contacto)}</span>` : ""}<span>${n} ingreso${n === 1 ? "" : "s"}</span></div></button>`; }).join("")}
-    ${sc.length ? `<div class="grouph">Sin condición configurada</div>${sc.map((l) => `<button type="button" class="card" data-prov="" data-nombre="${esc(l.proveedor)}" data-cuit="${esc(l.cuit || "")}"><div class="row1"><span class="ttl">${esc(l.proveedor)}</span><span class="chip warn">Configurar</span></div></button>`).join("")}` : ""}
-    ${!rows.length && !sc.length ? `<div class="empty"><b>Sin proveedores todavía</b><span>Tocá <b>+ Proveedor</b> y cargá su condición de pago.</span></div>` : ""}</div>`;
+  const i = (attrs, v, cls = "") => `<input type="text" ${attrs} value="${esc(v ?? "")}"${cls ? ` class="${cls}"` : ""}>`;
+  const sel = (attr, v) => `<select ${attr}><option value="">— Sin definir —</option>${condOptions(v || "")}</select>`;
+  const nuevaFila = (nombre = "", cuit = "", cls = "nuevo") => `<tr class="${cls}">
+      <td>${i('data-n="nombre" placeholder="Nombre del proveedor" aria-label="Proveedor nuevo"', nombre)}</td>
+      <td>${i('data-n="cuit" placeholder="CUIT" aria-label="CUIT"', cuit, "mono")}</td>
+      <td>${sel('data-n="condicion" aria-label="Condición"', "")}</td>
+      <td>${i('data-n="dias" inputmode="numeric" placeholder="días" aria-label="Días"', "", "num")}</td>
+      <td>${i('data-n="diasValores" inputmode="numeric" placeholder="días" aria-label="Valores a"', "", "num")}</td>
+      <td><button class="btn small primary" type="button" data-pa="add">Agregar</button></td></tr>`;
+  el.innerHTML = `<div class="tablewrap"><table class="items provtab"><thead><tr><th>Proveedor</th><th style="width:160px">CUIT</th><th style="width:170px">Condición</th><th class="num" style="width:80px">Días</th><th class="num" style="width:100px" title="Días desde la factura para entregar valores (opcional)">Valores a</th><th style="width:120px"></th></tr></thead>
+    <tbody>${rows.map((p) => `<tr data-pid="${esc(p.id)}">
+      <td>${i('data-f="nombre" aria-label="Proveedor"', p.nombre)}</td>
+      <td>${i('data-f="cuit" aria-label="CUIT"', p.cuit, "mono")}</td>
+      <td>${sel('data-f="condicion" aria-label="Condición"', p.condicion)}</td>
+      <td>${i('data-f="dias" inputmode="numeric" aria-label="Días"', p.dias, "num")}</td>
+      <td>${i('data-f="diasValores" inputmode="numeric" aria-label="Valores a"', p.diasValores, "num")}</td>
+      <td style="white-space:nowrap">${provDel === p.id ? `<button class="btn small danger" type="button" data-pa="del-ok">Borrar</button> <button class="btn small" type="button" data-pa="del-no">No</button>` : `<button class="btn small" type="button" data-pa="mas" title="Medio de pago, contacto y notas">Más</button> <button class="btn small" type="button" data-pa="del" aria-label="Borrar proveedor">✕</button>`}</td></tr>`).join("")}
+      ${nuevaFila()}
+      ${sc.length ? `<tr class="sep-row"><td colspan="6">Aparecen en ingresos y todavía no tienen condición</td></tr>${sc.map((l) => nuevaFila(l.proveedor, l.cuit || "", "sugerido")).join("")}` : ""}
+    </tbody></table></div>
+    ${!rows.length ? `<div class="hint">Todavía no hay proveedores. Cargalos de a uno en la fila de abajo o pegá la lista desde Excel.</div>` : ""}`;
 }
 function openProveedor(id, nombre = "", cuit = "") {
   const p = id ? S.proveedores.find((x) => x.id === id) : { nombre, cuit };
@@ -1442,14 +1561,14 @@ function initResumen() {
   $("#mR").onchange = renderResumen;
   $("#bCsvR").onclick = () => {
     const m = $("#mR").value; const rows = [["Sociedad", "Fecha", "Proveedor", "Factura", "Moneda", "SKU", "Descripcion", "Cantidad", "P. lista", "Desc. %", "Unit. neto", "IVA %", "Unit. c/IVA", "Subtotal", "Costo unit. final", "Bonificación factura", "Neto factura", "Impuestos factura", "Total factura", "Desc. adicional", "Costo efectivo", "Costo puesto unit. ARS", "Cargado por"]];
-    S.compras.filter((c) => c.mes === m && pasaSoc(socDeCompra(c))).forEach((c) => { const mm = S.montos[c.id]; (c.items || []).forEach((it, i) => { const p = mm?.items?.[i]; const iva = p?.iva ?? 21; const f0 = i === 0 && mm; rows.push([socNom(socDeCompra(c)), c.fecha, c.proveedor, c.factura, c.moneda, it.sku, it.desc, it.cant, p?.lista ?? "", p?.dto ?? "", p?.pu ?? "", iva, p ? +(p.pu * (1 + iva / 100)).toFixed(2) : "", p?.subtotal ?? "", p && mm ? +(p.pu * factorCosto(mm)).toFixed(2) : "", f0 ? mm.bonif?.importe ?? 0 : "", f0 ? netoDe(mm) : "", f0 ? mm.impTotal ?? 0 : "", f0 ? totF(mm) : "", f0 ? mm.extra?.importe ?? 0 : "", f0 ? costoDe(mm) : "", (() => { const cp = p && costoPuesto(mm, S.gastos[c.legajoId || c.id]); return cp ? +unitPuesto(p, mm, cp).toFixed(2) : ""; })(), c.creadoPorNombre]); }); });
+    S.compras.filter((c) => mesCompra(c) === m && pasaSoc(socDeCompra(c))).forEach((c) => { const mm = S.montos[c.id]; (c.items || []).forEach((it, i) => { const p = mm?.items?.[i]; const iva = p?.iva ?? 21; const f0 = i === 0 && mm; rows.push([socNom(socDeCompra(c)), c.fecha, c.proveedor, c.factura, c.moneda, it.sku, it.desc, it.cant, p?.lista ?? "", p?.dto ?? "", p?.pu ?? "", iva, p ? +(p.pu * (1 + iva / 100)).toFixed(2) : "", p?.subtotal ?? "", p && mm ? +(p.pu * factorCosto(mm)).toFixed(2) : "", f0 ? mm.bonif?.importe ?? 0 : "", f0 ? netoDe(mm) : "", f0 ? mm.impTotal ?? 0 : "", f0 ? totF(mm) : "", f0 ? mm.extra?.importe ?? 0 : "", f0 ? costoDe(mm) : "", (() => { const cp = p && costoPuesto(mm, S.gastos[c.legajoId || c.id]); return cp ? +unitPuesto(p, mm, cp).toFixed(2) : ""; })(), c.creadoPorNombre]); }); });
     descargarCSV(`compras-${m}.csv`, rows);
   };
 }
 function renderResumen() {
   if (!S.admin || !$("#rStats") || $("#v-resumen").hidden) return;
   if (!S.loaded.compras || !S.loaded.montos) { $("#rStats").innerHTML = `<div class="empty"><b>Cargando…</b></div>`; return; }
-  const m = $("#mR").value; const del = S.compras.filter((c) => c.mes === m && pasaSoc(socDeCompra(c)));
+  const m = $("#mR").value; const del = S.compras.filter((c) => mesCompra(c) === m && pasaSoc(socDeCompra(c)));
   { const t = $("#rSoc"); t.hidden = !S.socFiltro; t.textContent = socNom(S.socFiltro); }
   const z = () => ({ neto: 0, iva: 0, perc: 0, tot: 0 }); const tot = { ARS: z(), USD: z() }; const conceptos = {}; let unid = 0, sinP = 0, sinImp = 0;
   del.forEach((c) => {
@@ -1457,7 +1576,7 @@ function renderResumen() {
     const t = (tot[mm.moneda] ??= z()); t.neto += netoDe(mm); t.tot += totF(mm); t.bonif = (t.bonif || 0) + (mm.bonif?.importe || 0); t.extra = (t.extra || 0) + (mm.extra?.importe || 0); sinP += mm.sinPrecio || 0; if (!(mm.impuestos || []).length) sinImp++;
     (mm.impuestos || []).forEach((x) => { if (/^iva\b/i.test(x.concepto)) t.iva += x.importe; else t.perc += x.importe; const k = mm.moneda + "|" + x.concepto; conceptos[k] = (conceptos[k] || 0) + x.importe; });
   });
-  const gMes = Object.values(S.gastos).filter((g) => g.mes === m && pasaSoc(legById(g.legajoId || g.id)?.sociedadId));
+  const gMes = Object.values(S.gastos).filter((g) => mesDe(g.fecha || "") === m && pasaSoc(legById(g.legajoId || g.id)?.sociedadId));
   const aARS = (g, v) => (g.moneda === "USD" ? v * (g.tc || 0) : v);
   const gCosto = gMes.reduce((a, g) => a + aARS(g, g.costo || 0), 0), gCred = gMes.reduce((a, g) => a + aARS(g, g.credito || 0), 0);
   $("#rStats").innerHTML = `<div class="stats">
@@ -1469,7 +1588,7 @@ function renderResumen() {
     ${Object.keys(conceptos).length ? `<div class="tablewrap" style="margin-top:10px"><table><thead><tr><th>Impuesto / percepción</th><th>Moneda</th><th class="num">Importe del mes</th></tr></thead><tbody>${Object.entries(conceptos).sort().map(([k, v]) => { const [mon, con] = k.split("|"); return `<tr><td>${esc(con)}</td><td>${mon}</td><td class="num">${fmtNum(v, 2)}</td></tr>`; }).join("")}</tbody></table></div>` : ""}`;
   const [y, mm0] = m.split("-").map(Number); const meses = [];
   for (let i = 11; i >= 0; i--) { const d = new Date(y, mm0 - 1 - i, 1); meses.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`); }
-  const porMes = (mon) => meses.map((k) => S.compras.filter((c) => c.mes === k && pasaSoc(socDeCompra(c))).reduce((a, c) => a + (S.montos[c.id]?.moneda === mon ? totF(S.montos[c.id]) : 0), 0));
+  const porMes = (mon) => meses.map((k) => S.compras.filter((c) => mesCompra(c) === k && pasaSoc(socDeCompra(c))).reduce((a, c) => a + (S.montos[c.id]?.moneda === mon ? totF(S.montos[c.id]) : 0), 0));
   $("#rBars").innerHTML = `<div class="hint">Total facturado con impuestos.</div>` + ["USD", "ARS"].map((mon) => {
     const v = porMes(mon); const max = Math.max(...v, 0); if (!max) return `<div class="hint">Sin compras en ${mon} en los últimos 12 meses.</div>`;
     return `<div style="display:grid;gap:6px"><b class="hint" style="font-weight:600">${mon}</b><div class="bars">${meses.map((k, i) => `<div class="b${k === m ? " cur" : ""}"><span class="mono">${fmtMes(k)}</span><span class="track"><span class="fill" style="display:block;width:${(v[i] / max) * 100}%"></span></span><span class="num">${v[i] ? fmtNum(v[i]) : "—"}</span></div>`).join("")}</div></div>`;
@@ -1509,6 +1628,11 @@ function initUsuarios() {
         <div class="bar"><button class="btn primary" type="submit" id="bSoc">Agregar sociedad</button><button class="btn" type="button" id="bSocCanc" hidden>Cancelar</button></div>
       </form>
     </div>
+    <div class="panel">
+      <h2>Proveedores y condiciones de pago</h2>
+      <div class="hint">La condición de cada proveedor se aplica sola en cada ingreso nuevo (gana sobre lo que lea el escáner) y define el vencimiento en Pagos. Los cambios se guardan al salir de cada campo.</div>
+      <div id="provCfg"></div>
+    </div>
     <form class="panel" id="formU" autocomplete="off">
       <h2>Dar de alta un usuario</h2>
       <div class="grid2">
@@ -1542,6 +1666,7 @@ function initUsuarios() {
     if (act === "del-ok") { try { await deleteDoc(doc(db, "sociedades", id)); } catch (_) {} socDel = null; if (socEdit === id) resetSoc(); return renderSociedades(); }
   });
   window.__socDel = () => socDel;
+  initProveedores();
   $("#formU").addEventListener("submit", async (e) => {
     e.preventDefault(); const err = (t) => { $("#uErr").textContent = t; $("#uErr").hidden = !t; }; err("");
     const b = $("#bU"); b.disabled = true; const sa = secondaryAuth();

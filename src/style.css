@@ -189,3 +189,25 @@ table.items .c-dto{width:8%}
 .chip.soc{background:var(--ink);color:var(--surface);border-color:transparent;font-weight:700;letter-spacing:.02em}
 .socsel{width:auto;max-width:200px;padding:5px 8px;font-size:.85rem;font-weight:600;border-color:var(--accent)}
 @media (max-width:560px){.who .socsel{max-width:130px}}
+.fecha-wrap{position:relative;display:flex;align-items:stretch;min-width:0}
+.fecha-wrap .fecha-txt{flex:1;min-width:0;padding-right:40px;font-variant-numeric:tabular-nums;text-transform:none;letter-spacing:0;font-weight:400;color:var(--ink);font-size:15px}
+.fecha-wrap .fecha-txt.bad{border-color:var(--warn);background:var(--warn-bg)}
+.fecha-cal{position:absolute;right:4px;top:50%;transform:translateY(-50%);border:0;background:none;cursor:pointer;font-size:1rem;padding:4px 6px;line-height:1}
+.fecha-nativa{position:absolute!important;right:0;bottom:0;width:1px!important;height:1px!important;opacity:0;pointer-events:none;padding:0!important;border:0!important}
+.linkbtn{border:0;background:none;padding:2px 0;color:var(--accent-ink);font-weight:600;font-size:.82rem;cursor:pointer;justify-self:start;text-transform:none;letter-spacing:0;text-decoration:underline}
+.paybox{display:flex;gap:12px;align-items:center;padding:12px 14px;border:1.5px solid var(--warn);background:var(--warn-bg);border-radius:10px;cursor:pointer}
+.paybox.ok{border-color:var(--ok);background:var(--ok-bg)}
+.paybox input{width:24px;height:24px;accent-color:var(--ok);flex:none;cursor:pointer}
+.paybox .txt{flex:1;display:grid;min-width:0}
+.paybox small{color:var(--muted)}
+.paycheck{padding:4px 10px;border:1px solid var(--line);border-radius:8px;background:var(--surface)}
+.paycheck input{width:22px;height:22px}
+.payrow{cursor:pointer}
+table.provtab{min-width:760px}
+table.provtab td{padding:5px 6px}
+table.provtab input,table.provtab select{padding:7px 8px;border-radius:6px}
+table.provtab tr.saved td{background:var(--ok-bg);transition:background .3s}
+table.provtab tr.err td{background:var(--warn-bg)}
+table.provtab tr.nuevo td{background:var(--sunk)}
+table.provtab tr.sep-row td{font-family:var(--f-display);font-weight:700;text-transform:uppercase;letter-spacing:.05em;color:var(--muted);background:var(--surface);padding-top:14px}
+table.provtab tr.sugerido td:first-child input{font-weight:600}

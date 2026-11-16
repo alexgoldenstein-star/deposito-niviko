@@ -17,7 +17,9 @@ receptor: { type: "object", description: "Comprador / cliente a cuyo nombre est�
     cuit: { type: "string", description: "CUIT / Tax ID del emisor, si figura" },
     tipo_comprobante: { type: "string", description: "Ej: Factura A, Factura B, Commercial Invoice, Proforma, Guía, Despacho" },
     numero: { type: "string", description: "Número de comprobante tal como figura (ej: 0003-00012345)" },
-    fecha: { type: "string", description: "Fecha de emisión en formato YYYY-MM-DD" },
+    fecha: { type: "string", description: "Fecha de emisión en formato YYYY-MM-DD. OJO: en facturas de EE.UU. o en inglés la fecha impresa suele ser MM/DD/YYYY (mes primero); en Argentina DD/MM/AAAA. Si figura el mes en letras (Nov 5, 2026 / 05-NOV-26), usalo" },
+    fecha_texto: { type: "string", description: "La fecha exactamente como está impresa en el documento" },
+    formato_fecha: { type: "string", enum: ["DMY", "MDY", "YMD", "TEXTO"], description: "Cómo interpretaste la fecha impresa: DMY día/mes/año, MDY mes/día/año (EE.UU.), YMD, o TEXTO si el mes está en letras" },
     moneda: { type: "string", enum: ["ARS", "USD", "OTRA"], description: "Moneda de los importes" },
     items: {
       type: "array",
@@ -168,7 +170,7 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: MODEL,
         max_tokens: 8000,
-        system: "Sos un asistente de administración de una importadora argentina. Leés facturas de compra (locales A/B/C, commercial invoices en inglés o chino, guías aéreas de courier, facturas de courier y de despacho de aduana) y extraés los datos con exactitud. Copiá números y códigos tal cual figuran; no inventes renglones ni completes datos que no se ven. Los números van como números (sin separadores de miles). Si algo no se lee bien, decilo en observaciones.",
+        system: "Sos un asistente de administración de una importadora argentina. Leés facturas de compra (locales A/B/C, commercial invoices en inglés o chino, guías aéreas de courier, facturas de courier y de despacho de aduana) y extraés los datos con exactitud. Las fechas siempre se devuelven como YYYY-MM-DD: en documentos de EE.UU. o en inglés la fecha numérica suele ser mes/día/año, en documentos argentinos día/mes/año; decidí por el país del emisor y el idioma, y si hay ambigüedad informala en fecha_texto y formato_fecha. Copiá números y códigos tal cual figuran; no inventes renglones ni completes datos que no se ven. Los números van como números (sin separadores de miles). Si algo no se lee bien, decilo en observaciones.",
         tools: imp
           ? [{ name: "registrar_documentos", description: "Registra los documentos de importación encontrados en el archivo", input_schema: SCHEMA_IMP }]
           : [{ name: "registrar_factura", description: "Registra los datos extraídos de la factura", input_schema: SCHEMA }],
