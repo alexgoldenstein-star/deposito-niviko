@@ -12,7 +12,8 @@ const TIPOS_OK = ["image/jpeg", "image/png", "image/webp", "application/pdf"];
 const SCHEMA = {
   type: "object",
   properties: {
-    proveedor: { type: "string", description: "Razón social o nombre del emisor de la factura" },
+receptor: { type: "object", description: "Comprador / cliente a cuyo nombre está el documento (Señor/es, Cliente, Bill to, Sold to, Consignee)", properties: { nombre: { type: "string" }, cuit: { type: "string", description: "CUIT / Tax ID del comprador" } } },
+        proveedor: { type: "string", description: "Razón social o nombre del emisor de la factura" },
     cuit: { type: "string", description: "CUIT / Tax ID del emisor, si figura" },
     tipo_comprobante: { type: "string", description: "Ej: Factura A, Factura B, Commercial Invoice, Proforma, Guía, Despacho" },
     numero: { type: "string", description: "Número de comprobante tal como figura (ej: 0003-00012345)" },
@@ -66,6 +67,69 @@ const SCHEMA = {
   required: ["proveedor", "numero", "fecha", "moneda", "items", "total"],
 };
 
+// ---- Importación (courier / contenedor): un archivo puede traer uno o varios de estos documentos
+const CONCEPTO_IMP = {
+  type: "object",
+  properties: {
+    concepto: { type: "string", description: "Concepto tal como figura (ej: Flete internacional, Servicio courier, Seguro, Derechos de importación, Tasa estadística, Arancel SIM, Gastos de gestión, Almacenaje, IVA 21%, IVA adicional 20%, Percepción Ganancias, Percepción IIBB)" },
+    tipo: { type: "string", enum: ["costo", "credito"], description: "costo = se suma al costo de la mercadería (flete, servicio, seguro, derechos, tasa estadística, aranceles, gestión, almacenaje, honorarios). credito = impuesto recuperable (IVA, IVA adicional, percepciones de Ganancias, IVA o IIBB)" },
+    importe: { type: "number" },
+  },
+  required: ["concepto", "importe"],
+};
+const SCHEMA_IMP = {
+  type: "object",
+  properties: {
+    documentos_detectados: { type: "array", items: { type: "string", enum: ["invoice_mercaderia", "guia", "factura_logistica", "otro"] }, description: "Qué documentos aparecen en el archivo, en el orden en que aparecen" },
+    invoice_mercaderia: {
+      type: "object",
+      description: "Commercial invoice / proforma del proveedor del exterior con los productos comprados. Omitir si no está en el archivo",
+      properties: { ...SCHEMA.properties, incoterm: { type: "string", description: "FOB, EXW, CIF, DDP… si figura" } },
+    },
+    guia: {
+      type: "object",
+      description: "Guía aérea / AWB / waybill del courier. Omitir si no está en el archivo",
+      properties: {
+        courier: { type: "string", description: "DHL, FedEx, UPS, etc." },
+        numero_guia: { type: "string", description: "Número de guía / AWB / tracking tal cual figura" },
+        fecha: { type: "string", description: "Fecha de la guía, YYYY-MM-DD" },
+        remitente: { type: "string" },
+        receptor: { type: "object", description: "Destinatario / consignee", properties: { nombre: { type: "string" }, cuit: { type: "string" } } },
+        origen: { type: "string", description: "Ciudad / país de origen" },
+        bultos: { type: "number" },
+        peso_kg: { type: "number", description: "Peso real en kg" },
+        peso_volumetrico_kg: { type: "number" },
+        valor_declarado: { type: "number" },
+        moneda_valor: { type: "string" },
+        descripcion: { type: "string", description: "Descripción de la mercadería declarada" },
+      },
+    },
+    factura_logistica: {
+      type: "object",
+      description: "Factura del courier o despachante por el servicio logístico y los tributos/impuestos de importación (normalmente en pesos). Omitir si no está en el archivo",
+      properties: {
+        receptor: { type: "object", description: "Cliente a cuyo nombre está la factura", properties: { nombre: { type: "string" }, cuit: { type: "string" } } },
+        emisor: { type: "string", description: "Razón social del courier o despachante que emite la factura" },
+        cuit: { type: "string" },
+        tipo_comprobante: { type: "string" },
+        numero: { type: "string", description: "Número de comprobante" },
+        fecha: { type: "string", description: "YYYY-MM-DD" },
+        moneda: { type: "string", enum: ["ARS", "USD", "OTRA"] },
+        tipo_cambio: { type: "number", description: "Tipo de cambio / cotización del dólar usado, en pesos por USD, si figura" },
+        numero_despacho: { type: "string", description: "N° de despacho / destinación aduanera, si figura" },
+        numero_guia: { type: "string", description: "N° de guía al que corresponde, si figura" },
+        valor_fob_usd: { type: "number", description: "Valor FOB o en aduana de la mercadería en USD, si figura" },
+        conceptos: { type: "array", items: CONCEPTO_IMP, description: "Cada renglón de servicio, tributo o impuesto con su importe" },
+        total: { type: "number", description: "Total final de la factura" },
+        condicion_pago: { type: "string" },
+        fecha_vencimiento: { type: "string", description: "YYYY-MM-DD si figura" },
+      },
+    },
+    observaciones: { type: "string", description: "Cualquier cosa ilegible, dudosa o importante" },
+  },
+  required: ["documentos_detectados"],
+};
+
 async function usuarioActivo(idToken) {
   const { payload } = await jwtVerify(idToken, JWKS, {
     issuer: `https://securetoken.google.com/${PROJECT}`,
@@ -89,7 +153,8 @@ export default async function handler(req, res) {
   try { if (!token || !(await usuarioActivo(token))) return res.status(401).json({ error: "Usuario no habilitado." }); }
   catch { return res.status(401).json({ error: "Sesión vencida. Volvé a entrar." }); }
 
-  const { data, mime } = req.body || {};
+  const { data, mime, tipo } = req.body || {};
+  const imp = tipo === "importacion";
   if (!data || !TIPOS_OK.includes(mime)) return res.status(400).json({ error: "Mandá una foto (JPG/PNG) o un PDF." });
 
   const archivo = mime === "application/pdf"
@@ -103,10 +168,14 @@ export default async function handler(req, res) {
       body: JSON.stringify({
         model: MODEL,
         max_tokens: 8000,
-        system: "Sos un asistente de administración de una importadora argentina. Leés facturas de compra (locales A/B/C, commercial invoices en inglés o chino, facturas de courier y de despacho de aduana) y extraés los datos con exactitud. Copiá números y códigos tal cual figuran; no inventes renglones ni completes datos que no se ven. Los números van como números (sin separadores de miles). Si algo no se lee bien, decilo en observaciones.",
-        tools: [{ name: "registrar_factura", description: "Registra los datos extraídos de la factura", input_schema: SCHEMA }],
+        system: "Sos un asistente de administración de una importadora argentina. Leés facturas de compra (locales A/B/C, commercial invoices en inglés o chino, guías aéreas de courier, facturas de courier y de despacho de aduana) y extraés los datos con exactitud. Copiá números y códigos tal cual figuran; no inventes renglones ni completes datos que no se ven. Los números van como números (sin separadores de miles). Si algo no se lee bien, decilo en observaciones.",
+        tools: imp
+          ? [{ name: "registrar_documentos", description: "Registra los documentos de importación encontrados en el archivo", input_schema: SCHEMA_IMP }]
+          : [{ name: "registrar_factura", description: "Registra los datos extraídos de la factura", input_schema: SCHEMA }],
         tool_choice: { type: "auto" },
-        messages: [{ role: "user", content: [archivo, { type: "text", text: "Extraé los datos de esta factura de compra, incluyendo todos los renglones de productos, y registralos llamando a la herramienta registrar_factura. Respondé solo con esa llamada." }] }],
+        messages: [{ role: "user", content: [archivo, { type: "text", text: imp
+          ? "Este archivo es de una importación por courier o contenedor. Puede contener uno o varios de estos documentos: (1) la invoice comercial de la mercadería del proveedor del exterior, (2) la guía aérea / AWB del courier, (3) la factura del courier o despachante por el servicio logístico y los impuestos/tributos de importación. Identificá cuáles aparecen, completá solo esas secciones (todos los renglones de productos y todos los conceptos de la factura logística) y registralo llamando a registrar_documentos. Respondé solo con esa llamada."
+          : "Extraé los datos de esta factura de compra, incluyendo todos los renglones de productos, y registralos llamando a la herramienta registrar_factura. Respondé solo con esa llamada." }] }],
       }),
     });
     const out = await r.json();

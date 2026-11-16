@@ -35,6 +35,12 @@ service cloud.firestore {
       allow write: if admin();
     }
 
+    // Sociedades (empresas a cuyo nombre llegan las facturas): todos las leen, solo admin las edita
+    match /sociedades/{id} {
+      allow read: if activo();
+      allow write: if admin();
+    }
+
     match /skus/{id} {
       allow read, create, update: if activo();
       allow delete: if admin();
@@ -44,6 +50,13 @@ service cloud.firestore {
     match /compras/{id} {
       allow read, create: if activo();
       allow update, delete: if admin();
+    }
+
+    // Factura de servicio logístico e impuestos de una importación (mismo id que el legajo).
+    // Igual que los montos: cualquiera la carga, solo administración la lee o la edita.
+    match /gastosImport/{id} {
+      allow create: if activo();
+      allow read, update, delete: if admin();
     }
 
     // Precios, subtotales y total de cada compra. Mismo id que en "compras".

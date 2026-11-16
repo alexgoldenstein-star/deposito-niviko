@@ -186,3 +186,6 @@ table.items .c-dto{width:8%}
 .stat.alert b{color:var(--warn)}
 .improw.bon{grid-template-columns:70px 90px 150px auto}
 @media (max-width:560px){.improw.bon{grid-template-columns:56px 1fr 1fr auto}}
+.chip.soc{background:var(--ink);color:var(--surface);border-color:transparent;font-weight:700;letter-spacing:.02em}
+.socsel{width:auto;max-width:200px;padding:5px 8px;font-size:.85rem;font-weight:600;border-color:var(--accent)}
+@media (max-width:560px){.who .socsel{max-width:130px}}
